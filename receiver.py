@@ -2,19 +2,19 @@
 receiver.py — приёмник текстового сообщения через звук (BFSK).
 
 Как работает:
-  1. Записывает звук с микрофона (по умолчанию 40 секунд).
+  1. Записывает звук с микрофона (по умолчанию 20 секунд).
   2. Сохраняет запись в recording.wav (можно прослушать для отладки).
   3. Находит стартовый маркер 3500 Гц.
-  4. Читает биты каждые 500 мс: 1000 Гц = 0, 2000 Гц = 1.
-     Анализируются только центральные 300 мс каждого бита —
-     края (по 100 мс) отбрасываются из-за реверберации и погрешности
+  4. Читает биты каждые 100 мс: 1000 Гц = 0, 2000 Гц = 1.
+     Анализируются только центральные 50 мс каждого бита —
+     края (по 25 мс) отбрасываются из-за реверберации и погрешности
      синхронизации.
   5. Останавливается на конечном маркере 3500 Гц.
   6. Переводит биты в текст (UTF-8) и записывает в received_message.txt.
 
 Запуск (ЗАПУСКАТЬ ДО sender.py!):
     python receiver.py
-    python receiver.py --duration 60 --device 1
+    python receiver.py --duration 30 --device 1
 """
 
 import argparse
@@ -30,7 +30,7 @@ except ImportError:
 
 # ==== Параметры протокола (должны совпадать с sender.py!) ====
 SAMPLE_RATE = 48000
-BIT_DURATION = 0.5        # 500 мс на бит
+BIT_DURATION = 0.1        # 100 мс на бит
 FREQ_ZERO = 1000          # бит 0
 FREQ_ONE = 2000           # бит 1
 FREQ_MARKER = 3500        # маркер (НЕ 3000: это гармоника 1000 Гц!)
@@ -130,7 +130,7 @@ def decode_signal(signal: np.ndarray):
         return None, []
 
     bit_samples = int(BIT_DURATION * SAMPLE_RATE)
-    guard = int(0.1 * SAMPLE_RATE)  # отбрасываем по 100 мс с каждого края бита
+    guard = int(0.025 * SAMPLE_RATE)  # отбрасываем по 25 мс с каждого края бита
 
     bits: list[int] = []
     position = data_start
@@ -169,8 +169,8 @@ def bits_to_text(bits: list[int]) -> str:
 
 def main() -> None:
     parser = argparse.ArgumentParser(description="Приёмник текста через звук (BFSK)")
-    parser.add_argument("--duration", type=float, default=40.0,
-                        help="Длительность записи в секундах (по умолчанию 40)")
+    parser.add_argument("--duration", type=float, default=20.0,
+                        help="Длительность записи в секундах (по умолчанию 20)")
     parser.add_argument("--device", type=int, default=None,
                         help="Номер микрофона из devices.py")
     parser.add_argument("--wav", default="recording.wav",
