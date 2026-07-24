@@ -5,9 +5,9 @@ receiver.py — приёмник текстового сообщения чер�
   1. Записывает звук с микрофона (по умолчанию 20 секунд).
   2. Сохраняет запись в recording.wav (можно прослушать для отладки).
   3. Находит стартовый маркер 3500 Гц.
-  4. Читает биты каждые 100 мс: 1000 Гц = 0, 2000 Гц = 1.
-     Анализируются только центральные 50 мс каждого бита —
-     края (по 25 мс) отбрасываются из-за реверберации и погрешности
+  4. Читает биты каждые 50 мс: 1000 Гц = 0, 2000 Гц = 1.
+     Анализируются только центральные 25 мс каждого бита —
+     края (по 12.5 мс) отбрасываются из-за реверберации и погрешности
      синхронизации.
   5. Останавливается на конечном маркере 3500 Гц.
   6. Переводит биты в текст (UTF-8) и записывает в received_message.txt.
@@ -30,7 +30,7 @@ except ImportError:
 
 # ==== Параметры протокола (должны совпадать с sender.py!) ====
 SAMPLE_RATE = 48000
-BIT_DURATION = 0.1        # 100 мс на бит
+BIT_DURATION = 0.05       # 50 мс на бит
 FREQ_ZERO = 1000          # бит 0
 FREQ_ONE = 2000           # бит 1
 FREQ_MARKER = 3500        # маркер (НЕ 3000: это гармоника 1000 Гц!)
@@ -132,9 +132,9 @@ def refine_data_start(signal: np.ndarray, coarse_start: int) -> int:
     на стык соседних битов — при 100 мс/бит это ломает всё сообщение
     (симптом: принятый бит = AND двух соседних отправленных битов)."""
     bit_samples = int(BIT_DURATION * SAMPLE_RATE)
-    guard = int(0.025 * SAMPLE_RATE)
-    max_shift = int(0.06 * SAMPLE_RATE)   # ±60 мс
-    step = int(0.005 * SAMPLE_RATE)       # шаг 5 мс
+    guard = int(0.0125 * SAMPLE_RATE)
+    max_shift = int(0.06 * SAMPLE_RATE)    # ±60 мс
+    step = int(0.0025 * SAMPLE_RATE)       # шаг 2.5 мс
 
     best_offset = 0
     best_score = -1.0
@@ -193,7 +193,7 @@ def decode_signal(signal: np.ndarray):
     data_start = refine_data_start(signal, data_start)
 
     bit_samples = int(BIT_DURATION * SAMPLE_RATE)
-    guard = int(0.025 * SAMPLE_RATE)  # отбрасываем по 25 мс с каждого края бита
+    guard = int(0.0125 * SAMPLE_RATE)  # отбрасываем по 12.5 мс с каждого края бита
 
     bits: list[int] = []
     position = data_start
