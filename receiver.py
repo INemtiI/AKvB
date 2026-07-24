@@ -123,11 +123,74 @@ def find_data_start(signal: np.ndarray):
     return None
 
 
+def refine_data_start(signal: np.ndarray, coarse_start: int) -> int:
+    """Точная синхронизация: перебирает сдвиги ±60 мс вокруг грубой
+    оценки и выбирает тот, при котором решения по битам максимально
+    уверенные (энергия одной частоты сильно преобладает над другой).
+
+    Без этого шага ошибка грубой оценки (~50 мс) ставит окно чтения
+    на стык соседних битов — при 100 мс/бит это ломает всё сообщение
+    (симптом: принятый бит = AND двух соседних отправленных битов)."""
+    bit_samples = int(BIT_DURATION * SAMPLE_RATE)
+    guard = int(0.025 * SAMPLE_RATE)
+    max_shift = int(0.06 * SAMPLE_RATE)   # ±60 мс
+    step = int(0.005 * SAMPLE_RATE)       # шаг 5 мс
+
+    best_offset = 0
+    best_score = -1.0
+
+    for offset in range(-max_shift, max_shift + 1, step):
+        start = coarse_start + offset
+        if start < 0:
+            continue
+
+        score = 0.0
+        count = 0
+        position = start
+
+        # Сразу перед первым битом должен звучать маркер — это
+        # отсекает ложную синхронизацию со сдвигом на целый бит
+        # (она тоже даёт «уверенные», но неверные решения).
+        if start >= bit_samples:
+            pre_segment = signal[start - bit_samples + guard:start - guard]
+            pre_winner, _ = classify_segment(pre_segment)
+            if pre_winner == FREQ_MARKER:
+                score += 10.0  # бонус сильнее любой суммы уверенностей
+
+        # Оцениваем уверенность на первых 16 битах.
+        while position + bit_samples <= len(signal) and count < 16:
+            segment = signal[position + guard:position + bit_samples - guard]
+            e0 = tone_energy(segment, FREQ_ZERO)
+            e1 = tone_energy(segment, FREQ_ONE)
+            em = tone_energy(segment, FREQ_MARKER)
+
+            if em > max(e0, e1):
+                break  # дошли до конечного маркера
+
+            top, second = max(e0, e1), min(e0, e1)
+            score += (top - second) / (top + second + 1e-12)
+            count += 1
+            position += bit_samples
+
+        if count > 0:
+            score /= count
+
+        # При равном счёте предпочитаем меньший сдвиг.
+        if count > 0 and (score > best_score + 1e-9 or
+                          (abs(score - best_score) <= 1e-9 and abs(offset) < abs(best_offset))):
+            best_score = score
+            best_offset = offset
+
+    return coarse_start + best_offset
+
+
 def decode_signal(signal: np.ndarray):
     """Декодирует запись: возвращает (текст, список битов)."""
     data_start = find_data_start(signal)
     if data_start is None:
         return None, []
+
+    data_start = refine_data_start(signal, data_start)
 
     bit_samples = int(BIT_DURATION * SAMPLE_RATE)
     guard = int(0.025 * SAMPLE_RATE)  # отбрасываем по 25 мс с каждого края бита
