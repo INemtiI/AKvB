@@ -2,16 +2,19 @@
 receiver.py — приёмник текстового сообщения через звук (BFSK).
 
 Как работает:
-  1. Записывает звук с микрофона (по умолчанию 20 секунд).
+  1. Записывает звук с микрофона (по умолчанию 40 секунд).
   2. Сохраняет запись в recording.wav (можно прослушать для отладки).
-  3. Находит стартовый маркер 3000 Гц.
-  4. Читает биты каждые 100 мс: 1000 Гц = 0, 2000 Гц = 1.
-  5. Останавливается на конечном маркере 3000 Гц.
+  3. Находит стартовый маркер 3500 Гц.
+  4. Читает биты каждые 500 мс: 1000 Гц = 0, 2000 Гц = 1.
+     Анализируются только центральные 300 мс каждого бита —
+     края (по 100 мс) отбрасываются из-за реверберации и погрешности
+     синхронизации.
+  5. Останавливается на конечном маркере 3500 Гц.
   6. Переводит биты в текст (UTF-8) и записывает в received_message.txt.
 
 Запуск (ЗАПУСКАТЬ ДО sender.py!):
     python receiver.py
-    python receiver.py --duration 30 --device 1
+    python receiver.py --duration 60 --device 1
 """
 
 import argparse
@@ -27,10 +30,10 @@ except ImportError:
 
 # ==== Параметры протокола (должны совпадать с sender.py!) ====
 SAMPLE_RATE = 48000
-BIT_DURATION = 0.1        # 100 мс на бит
+BIT_DURATION = 0.5        # 500 мс на бит
 FREQ_ZERO = 1000          # бит 0
 FREQ_ONE = 2000           # бит 1
-FREQ_MARKER = 3000        # стартовый/конечный маркер
+FREQ_MARKER = 3500        # маркер (НЕ 3000: это гармоника 1000 Гц!)
 MARKER_DURATION = 0.5
 
 OUTPUT_FILE = "received_message.txt"
@@ -85,13 +88,13 @@ def classify_segment(segment: np.ndarray):
 
 
 def find_data_start(signal: np.ndarray):
-    """Ищет конец стартового маркера 3000 Гц. Возвращает номер сэмпла,
+    """Ищет конец стартового маркера 3500 Гц. Возвращает номер сэмпла,
     с которого начинаются биты данных, или None, если маркер не найден."""
     hop = int(0.01 * SAMPLE_RATE)   # шаг 10 мс
     win = int(0.05 * SAMPLE_RATE)   # окно 50 мс
 
-    # Маркер должен держаться минимум 0.3 с (30 окон подряд).
-    required_run = 30
+    # Маркер должен уверенно держаться минимум 0.25 с (25 окон подряд).
+    required_run = 25
 
     run_length = 0
     for index in range(0, (len(signal) - win) // hop):
@@ -102,19 +105,18 @@ def find_data_start(signal: np.ndarray):
         is_marker = False
         if rms > 1e-4:
             winner, energies = classify_segment(segment)
-            others = [energies[FREQ_ZERO], energies[FREQ_ONE]]
+            others = max(energies[FREQ_ZERO], energies[FREQ_ONE])
             is_marker = (
                 winner == FREQ_MARKER
-                and energies[FREQ_MARKER] > 2 * max(others)
+                and energies[FREQ_MARKER] > 2 * others
             )
 
         if is_marker:
             run_length += 1
         else:
             if run_length >= required_run:
-                # Маркер только что закончился. Уточняем границу:
-                # окно index начинается на index*hop, центр перехода —
-                # примерно на пол-окна раньше конца этого окна.
+                # Маркер только что закончился. Граница перехода —
+                # примерно на пол-окна раньше начала этого окна.
                 return index * hop + win // 2 - hop // 2
             run_length = 0
 
@@ -128,7 +130,7 @@ def decode_signal(signal: np.ndarray):
         return None, []
 
     bit_samples = int(BIT_DURATION * SAMPLE_RATE)
-    guard = int(0.02 * SAMPLE_RATE)  # анализируем центральные 60 мс каждого бита
+    guard = int(0.1 * SAMPLE_RATE)  # отбрасываем по 100 мс с каждого края бита
 
     bits: list[int] = []
     position = data_start
@@ -167,8 +169,8 @@ def bits_to_text(bits: list[int]) -> str:
 
 def main() -> None:
     parser = argparse.ArgumentParser(description="Приёмник текста через звук (BFSK)")
-    parser.add_argument("--duration", type=float, default=20.0,
-                        help="Длительность записи в секундах (по умолчанию 20)")
+    parser.add_argument("--duration", type=float, default=40.0,
+                        help="Длительность записи в секундах (по умолчанию 40)")
     parser.add_argument("--device", type=int, default=None,
                         help="Номер микрофона из devices.py")
     parser.add_argument("--wav", default="recording.wav",
@@ -184,7 +186,7 @@ def main() -> None:
     text, bits = decode_signal(signal)
 
     if text is None:
-        print("\nFAILED: стартовый маркер 3000 Гц не найден.")
+        print("\nFAILED: стартовый маркер 3500 Гц не найден.")
         print("Проверьте громкость, расстояние и запускайте receiver ДО sender.")
         return
 
