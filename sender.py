@@ -1,35 +1,49 @@
 """
-sender.py — передатчик тестового сигнала.
+sender.py — передатчик текстового сообщения через звук (BFSK).
 
-Запускается на первом компьютере. Воспроизводит через динамик:
-  1) три коротких сигнала 1000 Гц (стартовая последовательность);
-  2) основной тон 2000 Гц длительностью 3 секунды;
-  3) завершающий сигнал 1000 Гц.
+Как работает:
+  1. Читает текст из файла MESSAGE_FILE (по умолчанию message.txt).
+  2. Переводит текст в биты (UTF-8, 8 бит на байт, старший бит первым).
+  3. Воспроизводит:
+       - стартовый маркер 3000 Гц (0.5 с) — по нему приёмник находит начало;
+       - биты: 0 = 1000 Гц, 1 = 2000 Гц, каждый длительностью 100 мс;
+       - конечный маркер 3000 Гц (0.5 с) — конец сообщения.
 
 Запуск:
     python sender.py
-    python sender.py --volume 0.8
-    python sender.py --device 2      # номер динамика из devices.py
+    python sender.py --file message.txt --volume 0.8
 """
 
 import argparse
 import time
+from pathlib import Path
 
 import numpy as np
-import sounddevice as sd
 
-SAMPLE_RATE = 48000
+try:
+    import sounddevice as sd
+except ImportError:
+    sd = None
+
+# ==== Параметры протокола (должны совпадать с receiver.py!) ====
+SAMPLE_RATE = 48000       # частота дискретизации
+BIT_DURATION = 0.1        # 100 мс на бит
+FREQ_ZERO = 1000          # бит 0
+FREQ_ONE = 2000           # бит 1
+FREQ_MARKER = 3000        # стартовый/конечный маркер
+MARKER_DURATION = 0.5     # длительность маркера
+
+# Файл с сообщением по умолчанию.
+MESSAGE_FILE = "message.txt"
 
 
 def create_tone(frequency: float, duration: float, volume: float) -> np.ndarray:
-    """Создаёт синусоидальный тон с плавным началом и концом."""
+    """Синусоидальный тон с плавными краями (без щелчков)."""
     sample_count = int(duration * SAMPLE_RATE)
     t = np.arange(sample_count) / SAMPLE_RATE
-
     signal = volume * np.sin(2 * np.pi * frequency * t)
 
-    # Плавное нарастание и затухание (20 мс), чтобы не было щелчков.
-    fade_samples = min(int(0.02 * SAMPLE_RATE), sample_count // 4)
+    fade_samples = min(int(0.005 * SAMPLE_RATE), sample_count // 4)  # 5 мс
     if fade_samples > 0:
         signal[:fade_samples] *= np.linspace(0, 1, fade_samples)
         signal[-fade_samples:] *= np.linspace(1, 0, fade_samples)
@@ -41,40 +55,58 @@ def create_silence(duration: float) -> np.ndarray:
     return np.zeros(int(duration * SAMPLE_RATE), dtype=np.float32)
 
 
-def create_transmission(volume: float) -> np.ndarray:
-    parts = []
+def text_to_bits(text: str) -> list[int]:
+    """Текст -> UTF-8 байты -> список битов (старший бит первым)."""
+    bits: list[int] = []
+    for byte in text.encode("utf-8"):
+        for position in range(7, -1, -1):
+            bits.append((byte >> position) & 1)
+    return bits
 
-    # 1. Тишина перед началом.
-    parts.append(create_silence(0.5))
 
-    # 2. Стартовая последовательность: три коротких сигнала 1000 Гц.
-    for _ in range(3):
-        parts.append(create_tone(1000, 0.25, volume))
-        parts.append(create_silence(0.15))
+def create_transmission(text: str, volume: float) -> np.ndarray:
+    """Собирает полный аудиосигнал: маркер + биты + маркер."""
+    bits = text_to_bits(text)
 
-    # 3. Основной тестовый сигнал: 2000 Гц, 3 секунды.
-    parts.append(create_tone(2000, 3.0, volume))
+    parts = [
+        create_silence(0.5),
+        create_tone(FREQ_MARKER, MARKER_DURATION, volume),  # старт
+    ]
 
-    # 4. Завершающий сигнал.
+    for bit in bits:
+        frequency = FREQ_ONE if bit == 1 else FREQ_ZERO
+        parts.append(create_tone(frequency, BIT_DURATION, volume))
+
+    parts.append(create_tone(FREQ_MARKER, MARKER_DURATION, volume))  # конец
     parts.append(create_silence(0.3))
-    parts.append(create_tone(1000, 0.5, volume))
 
     return np.concatenate(parts)
 
 
 def main() -> None:
-    parser = argparse.ArgumentParser(description="Передатчик тестового сигнала")
-    parser.add_argument("--volume", type=float, default=0.5,
-                        help="Громкость от 0.0 до 1.0 (по умолчанию 0.5)")
+    parser = argparse.ArgumentParser(description="Передатчик текста через звук (BFSK)")
+    parser.add_argument("--file", default=MESSAGE_FILE,
+                        help=f"Файл с сообщением (по умолчанию {MESSAGE_FILE})")
+    parser.add_argument("--volume", type=float, default=0.6,
+                        help="Громкость от 0.0 до 1.0 (по умолчанию 0.6)")
     parser.add_argument("--device", type=int, default=None,
                         help="Номер динамика из devices.py")
     args = parser.parse_args()
 
-    if not 0.0 <= args.volume <= 1.0:
-        raise SystemExit("Ошибка: громкость должна быть от 0.0 до 1.0")
+    if sd is None:
+        raise SystemExit("Ошибка: библиотека sounddevice не установлена (pip install sounddevice)")
 
-    transmission = create_transmission(args.volume)
+    message_path = Path(args.file)
+    if not message_path.exists():
+        raise SystemExit(f"Ошибка: файл {message_path} не найден")
 
+    text = message_path.read_text(encoding="utf-8")
+    bits = text_to_bits(text)
+
+    duration = len(bits) * BIT_DURATION + 2 * MARKER_DURATION + 0.8
+
+    print(f"Сообщение: {text!r}")
+    print(f"Битов: {len(bits)} | Длительность передачи: ~{duration:.1f} с")
     print("Сначала запустите receiver.py на другом компьютере!")
     print("Передача начнётся через 3 секунды...")
 
@@ -82,7 +114,9 @@ def main() -> None:
         print(f"{i}...")
         time.sleep(1)
 
-    print("Передаю сигнал...")
+    transmission = create_transmission(text, args.volume)
+
+    print("Передаю...")
     sd.play(transmission, samplerate=SAMPLE_RATE, device=args.device, blocking=True)
     print("Передача завершена.")
 
