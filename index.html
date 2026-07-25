@@ -3,7 +3,7 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>AKvB — анчоусы кричат в банку</title>
+<title>AM·01 — акустический модем</title>
 <style>
 :root {
   --bg: #0a0e0b;
@@ -152,7 +152,7 @@ footer b { color: var(--ink); font-weight: 400; }
 <div class="wrap">
 
 <header>
-  <div class="logo">AKvB<small>анчоусы кричат в банку</small></div>
+  <div class="logo">AM·01<small>акустический модем</small></div>
   <div class="led on-idle" id="led"><i></i><span id="ledText">ГОТОВ</span></div>
 </header>
 
@@ -242,6 +242,12 @@ footer b { color: var(--ink); font-weight: 400; }
   <div class="term" id="rxLog"></div>
   <a class="dl" id="dlLink">⤓ СОХРАНИТЬ ФАЙЛ</a>
 </section>
+
+<footer>
+  2/4/8-FSK · мс/символ и частоты настраиваются · авто-согласование режима служебной посылкой<br>
+  кадр <b>AM01</b>: имя + размер + SHA-256, блоки 64 Б с CRC32 · совместим с python-версией<br>
+  работает полностью офлайн · никаких внешних запросов
+</footer>
 
 </div>
 <script>
@@ -654,6 +660,18 @@ function decodeAuto(signal, sampleRate) {
   return { params: p, bits: decodeSymbols(signal, start2, sampleRate, p).bits, legacy: false };
 }
 
+// ── авто-стоп записи: возвращает разобранный кадр, если он уже принят целиком ──
+function tryDecodeComplete(signal, sampleRate) {
+  const res = decodeAuto(signal, sampleRate);
+  if (res.error || !res.bits || !res.bits.length) return null;
+  try {
+    const frame = parseFrame(bitsToBytes(res.bits));
+    return frame.truncated ? null : frame; // обрыв — ждём дальше
+  } catch (e) {
+    return null; // заголовок ещё не дошёл/повреждён — продолжаем запись
+  }
+}
+
 function validateParams(p) {
   const errors = [], warnings = [];
   if (p.symbolMs < 20 || p.symbolMs > 500) errors.push("длительность символа: 20–500 мс");
@@ -884,6 +902,7 @@ if (!isNode) {
   // ─── Приём + визуализатор ───
   let recCtx = null, recStream = null, recNode = null, analyser = null;
   let recChunks = [], recording = false, vizRaf = 0, recT0 = 0;
+  let recTimer = 0, recBusy = false; // автостоп по конечному маркеру
 
   const viz = $("viz"), vctx = viz.getContext("2d");
 
@@ -958,10 +977,31 @@ if (!isNode) {
       $("btnRec").classList.add("rec");
       $("dlLink").style.display = "none";
       setLed("rec", "ЗАПИСЬ");
-      log(rxLog, `запись пошла @ ${recCtx.sampleRate} Гц — запускайте передатчик`);
+      log(rxLog, `запись пошла @ ${recCtx.sampleRate} Гц — запускайте передатчик (остановлюсь сама в конце передачи)`);
       drawViz();
+      // автостоп: раз в секунду пробуем декодировать накопленное —
+      // как только кадр принят целиком (пришёл конечный маркер), останавливаем запись
+      recTimer = setInterval(() => {
+        if (!recording || recBusy) return;
+        const totalNow = recChunks.reduce((s, c) => s + c.length, 0);
+        if (totalNow < recCtx.sampleRate * 3) return; // раньше 3 с кадр физически не успеет
+        recBusy = true;
+        try {
+          const sig = new Float32Array(totalNow);
+          let o = 0;
+          for (const c of recChunks) { sig.set(c, o); o += c.length; }
+          if (tryDecodeComplete(sig, recCtx.sampleRate)) {
+            log(rxLog, "конечный маркер: сообщение принято целиком — останавливаю запись", "ok");
+            $("btnRec").onclick(); // штатная остановка и декодирование
+          }
+        } finally {
+          recBusy = false;
+        }
+      }, 1000);
     } else {
       recording = false;
+      clearInterval(recTimer);
+      recTimer = 0;
       cancelAnimationFrame(vizRaf);
       const sampleRate = recCtx.sampleRate;
       recNode.disconnect(); analyser.disconnect();

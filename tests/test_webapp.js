@@ -112,3 +112,18 @@ if (typeof packAscii7 === "function") {
   if (unpackAscii7(a7Res.payload) !== a7Text) throw new Error("ASCII7: текст после кадра не сошёлся");
   console.log("ASCII7 OK: 7-битная упаковка обратима, кадр переносит флаг кодировки");
 }
+
+// 7. Автостоп записи: полный кадр опознаётся как завершённый, обрыв — нет
+if (typeof tryDecodeComplete === "function" && typeof buildNegoSignal === "function") {
+  const asP = makeParams(8, 60, 1200, 380, 4300);
+  const asSig = buildNegoSignal(frame, sampleRate, 0.5, asP);
+  if (!tryDecodeComplete(asSig, sampleRate)) throw new Error("АВТОСТОП: полный кадр не опознан как завершённый");
+  for (const cut of [0.35, 0.6, 0.85]) {
+    const part = asSig.slice(0, Math.floor(asSig.length * cut));
+    if (tryDecodeComplete(part, sampleRate)) throw new Error(`АВТОСТОП: обрыв на ${cut * 100}% ошибочно принят за конец`);
+  }
+  const asQuiet = new Float32Array(sampleRate * 2);
+  for (let i = 0; i < asQuiet.length; i++) asQuiet[i] = 0.02 * rand();
+  if (tryDecodeComplete(asQuiet, sampleRate)) throw new Error("АВТОСТОП: шум ошибочно принят за кадр");
+  console.log("АВТОСТОП OK: конец передачи детектируется, обрыв и шум не путаются с концом");
+}
