@@ -563,8 +563,13 @@ function refineDataStart(signal, coarseStart, sampleRate, p = CANON) {
 }
 
 function decodeSymbols(signal, start, sampleRate, p) {
+  // Следящий декодер (early-late tracking): каждый символ оценивается в трёх
+  // положениях окна (раньше / по сетке / позже), и сетка сдвигается туда, где
+  // победивший тон чище. Компенсирует дрейф часов передатчика/приёмника,
+  // который на длинных кадрах уводит жёсткую сетку на соседние символы.
   const symSamples = Math.round(p.symDur * sampleRate);
   const guard = symSamples >> 2;
+  const delta = Math.max(1, (symSamples / 20) | 0); // запас слежения ~5% на символ
   const bits = [];
   let position = start;
   while (position + symSamples <= signal.length) {
@@ -572,8 +577,20 @@ function decodeSymbols(signal, start, sampleRate, p) {
     if (rms(signal, position + guard, segLen) < 2e-4) break;
     const c = classify(signal, position + guard, segLen, sampleRate, p);
     if (c.result === "marker") break;
-    for (let shift = p.bps - 1; shift >= 0; shift--) bits.push((c.result >> shift) & 1);
-    position += symSamples;
+    let bestOff = 0, bestResult = c.result, bestScore = -1;
+    for (const off of [-delta, 0, delta]) {
+      const s0 = position + off;
+      if (s0 < 0 || s0 + symSamples > signal.length) continue;
+      const c2 = classify(signal, s0 + guard, segLen, sampleRate, p);
+      if (c2.result === "marker") continue;
+      const top = c2.energies[c2.result];
+      const others = c2.energies.slice().sort((a, b) => b - a);
+      const second = others.length > 1 ? others[1] : 0;
+      const score = top / (second + c2.markerE + 1e-12);
+      if (score > bestScore) { bestScore = score; bestOff = off; bestResult = c2.result; }
+    }
+    for (let shift = p.bps - 1; shift >= 0; shift--) bits.push((bestResult >> shift) & 1);
+    position += symSamples + bestOff;
   }
   return { bits, end: position };
 }

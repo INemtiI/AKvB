@@ -307,9 +307,17 @@ def refine_data_start(signal: np.ndarray, coarse_start: int, p: ModemParams) -> 
 
 
 def decode_symbols(signal: np.ndarray, start: int, p: ModemParams):
-    """Читает символы до маркера/тишины. Возвращает (биты, позиция остановки)."""
+    """Читает символы до маркера/тишины, следя за дрейфом часов.
+
+    Early-late tracking: каждый символ оценивается в трёх положениях окна
+    (чуть раньше / по сетке / чуть позже), и сетка сдвигается туда, где
+    победивший тон сильнее всего отрывается от остальных. Это компенсирует
+    расхождение частот дискретизации передатчика и приёмника (clock drift),
+    которое на длинных кадрах уводит жёсткую сетку на соседние символы.
+    """
     sym = int(p.symbol_duration * SAMPLE_RATE)
     guard = sym // 4
+    delta = max(1, sym // 20)  # запас слежения ~5% на символ (дрейф ~0.1-0.3%)
     bits = []
     position = start
     while position + sym <= len(signal):
@@ -319,9 +327,28 @@ def decode_symbols(signal: np.ndarray, start: int, p: ModemParams):
         result, _, _ = classify_segment(seg, p)
         if result == "marker":
             break
+        best_off = 0
+        best_result = result
+        best_score = -1.0
+        for off in (-delta, 0, delta):
+            s0 = position + off
+            if s0 < 0 or s0 + sym > len(signal):
+                continue
+            seg2 = signal[s0 + guard:s0 + sym - guard]
+            r2, energies, marker_e = classify_segment(seg2, p)
+            if r2 == "marker":
+                continue
+            top = energies[r2]
+            others = sorted(energies, reverse=True)
+            second = others[1] if len(others) > 1 else 0.0
+            score = top / (second + marker_e + 1e-12)
+            if score > best_score:
+                best_score = score
+                best_off = off
+                best_result = r2
         for shift in range(p.bits_per_symbol - 1, -1, -1):
-            bits.append((result >> shift) & 1)
-        position += sym
+            bits.append((best_result >> shift) & 1)
+        position += sym + best_off
     return bits, position
 
 

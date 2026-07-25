@@ -73,4 +73,29 @@ if (typeof buildNegoSignal === "function") {
   if (!legacyRes.legacy) throw new Error("старый формат не опознан как legacy");
   if (!parseFrame(bitsToBytes(legacyRes.bits)).shaOk) throw new Error("legacy: SHA-256 не совпал");
   console.log("NEGO OK: старый формат без служебной посылки принимается по-прежнему");
+
+  // 5. Дрейф часов: запись растянута на ±0.25% (разные кварцы устройств) —
+  // следящий декодер должен удержать сетку на длинном кадре
+  const pDrift = makeParams(4, 100, 1500, 400, 3500);
+  const negoDrift = buildNegoSignal(frame, sampleRate, 0.5, pDrift);
+  for (const factor of [0.9975, 1.0025]) {
+    const n = Math.round(negoDrift.length * factor);
+    const stretched = new Float32Array(n);
+    for (let i = 0; i < n; i++) {
+      const x = (i * (negoDrift.length - 1)) / (n - 1);
+      const i0 = Math.floor(x);
+      const i1 = Math.min(i0 + 1, negoDrift.length - 1);
+      stretched[i] = negoDrift[i0] + (x - i0) * (negoDrift[i1] - negoDrift[i0]);
+    }
+    const noisy = new Float32Array(lead + n + lead);
+    for (let i = 0; i < noisy.length; i++) noisy[i] = 0.02 * rand();
+    for (let i = 0; i < n; i++) noisy[lead + i] += stretched[i];
+
+    const res = decodeAuto(noisy, sampleRate);
+    if (res.error) throw new Error(`ДРЕЙФ ${factor}: ${res.error}`);
+    if (res.legacy) throw new Error(`ДРЕЙФ ${factor}: служебная посылка не распознана`);
+    const rd = parseFrame(bitsToBytes(res.bits));
+    if (!rd.shaOk) throw new Error(`ДРЕЙФ ${factor}: SHA-256 не совпал`);
+    console.log(`ДРЕЙФ OK: ${((factor - 1) * 100).toFixed(2)}% — файл восстановлен, SHA-256 подтверждён`);
+  }
 }
