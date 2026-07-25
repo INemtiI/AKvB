@@ -11,6 +11,7 @@ file_sender.py — передача ЛЮБОГО файла через звук 
     python file_sender.py --file photo.jpg --mode 8 --preset wide --symbol-ms 60
     python file_sender.py --file a.bin --mode 2 --symbol-ms 200   # максимальная надёжность
     python file_sender.py --file a.bin --base 1600 --step 450 --marker 4000  # свои частоты
+    python file_sender.py --file a.bin --mode 16 --bands 6 --symbol-ms 50    # ТУРБО: ~480 бит/с
 """
 
 import argparse
@@ -42,7 +43,7 @@ def frame_to_signal(frame: bytes, volume: float) -> np.ndarray:
 
 def main() -> None:
     parser = argparse.ArgumentParser(
-        description="Передача файла через звук (2/4/8/16-FSK + авто-согласование параметров)")
+        description="Передача файла через звук (2/4/8/16-FSK, ТУРБО-полосы + авто-согласование)")
     parser.add_argument("--file", required=True, help="Путь к передаваемому файлу")
     parser.add_argument("--volume", type=float, default=0.6,
                         help="Громкость от 0.0 до 1.0 (по умолчанию 0.6)")
@@ -61,6 +62,9 @@ def main() -> None:
     parser.add_argument("--base", type=int, default=None, help="Своя частота первого тона, Гц")
     parser.add_argument("--step", type=int, default=None, help="Свой шаг между тонами, Гц")
     parser.add_argument("--marker", type=int, default=None, help="Своя частота маркера, Гц")
+    parser.add_argument("--bands", type=int, choices=(1, 2, 3, 4, 5, 6), default=1,
+                        help="ТУРБО: число параллельных частотных полос (1 = обычный режим;"
+                             " 4-6 полос по 16 тонов дают 320-480 бит/с)")
     args = parser.parse_args()
 
     if sd is None:
@@ -75,9 +79,14 @@ def main() -> None:
     if args.mode == 16 and preset != "ultra" and args.base is None and args.step is None:
         print("Для 16-FSK подходит только пресет ultra — автоматически беру ultra.")
         preset = "ultra"
+    # ТУРБО: полосам нужна сетка turbo (маркер 1000 Гц ниже всех тонов)
+    if args.bands > 1 and preset != "turbo" and args.base is None and args.step is None:
+        print(f"ТУРБО ({args.bands} полос) — автоматически беру пресет turbo.")
+        preset = "turbo"
 
     p = phy.make_params(args.mode, args.symbol_ms, preset,
-                        base=args.base, step=args.step, marker=args.marker)
+                        base=args.base, step=args.step, marker=args.marker,
+                        bands=args.bands)
     errors, warnings = phy.validate(p)
     for warning in warnings:
         print(f"⚠  {warning}")
@@ -98,7 +107,8 @@ def main() -> None:
             is_ascii7 = True
         except (UnicodeDecodeError, ValueError) as exc:
             print(f"⚠  ASCII-7 не подходит ({exc}) — отправляю как UTF-8")
-    frame = protocol.build_frame(path.name, payload, is_text=args.text, is_ascii7=is_ascii7)
+    frame = protocol.build_frame(path.name, payload, is_text=args.text, is_ascii7=is_ascii7,
+                                 fec=True)  # XOR-чётность: приёмник чинит одиночные битые блоки
     duration = phy.transmission_duration(len(frame), p)
 
     print(f"Файл: {path.name} ({len(payload)} байт)")

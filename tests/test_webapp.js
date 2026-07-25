@@ -112,3 +112,50 @@ if (typeof packAscii7 === "function") {
   if (unpackAscii7(a7Res.payload) !== a7Text) throw new Error("ASCII7: текст после кадра не сошёлся");
   console.log("ASCII7 OK: 7-битная упаковка обратима, кадр переносит флаг кодировки");
 }
+
+// 7. Автостоп записи: полный кадр опознаётся как завершённый, обрыв — нет
+if (typeof tryDecodeComplete === "function" && typeof buildNegoSignal === "function") {
+  const asP = makeParams(8, 60, 1200, 380, 4300);
+  // кадр БЕЗ FEC: у обрыва не должно быть шанса совпасть с целыми данными
+  const asFrame = buildFrame("тест.bin", payload, false, false, false);
+  const asSig = buildNegoSignal(asFrame, sampleRate, 0.5, asP);
+  if (!tryDecodeComplete(asSig, sampleRate)) throw new Error("АВТОСТОП: полный кадр не опознан как завершённый");
+  for (const cut of [0.35, 0.6, 0.85]) {
+    const part = asSig.slice(0, Math.floor(asSig.length * cut));
+    if (tryDecodeComplete(part, sampleRate)) throw new Error(`АВТОСТОП: обрыв на ${cut * 100}% ошибочно принят за конец`);
+  }
+  // кадр С FEC (глобальный frame): полный тоже опознаётся как завершённый
+  const asFecSig = buildNegoSignal(frame, sampleRate, 0.5, asP);
+  if (!tryDecodeComplete(asFecSig, sampleRate)) throw new Error("АВТОСТОП: полный FEC-кадр не опознан как завершённый");
+  const asQuiet = new Float32Array(sampleRate * 2);
+  for (let i = 0; i < asQuiet.length; i++) asQuiet[i] = 0.02 * rand();
+  if (tryDecodeComplete(asQuiet, sampleRate)) throw new Error("АВТОСТОП: шум ошибочно принят за кадр");
+  console.log("АВТОСТОП OK: конец передачи детектируется, обрыв и шум не путаются с концом");
+}
+
+
+// 8. ТУРБО-полосы: 4×16 тонов @ 50 мс + FEC (XOR-чётность)
+if (typeof bandQuality === "function") {
+  const tP = makeParams(16, 50, 1400, 150, 1000, 4);
+  const tFrame = buildFrame("turbo.bin", payload, false, false, true);
+  const tSig = buildNegoSignal(tFrame, sampleRate, 0.6, tP);
+  const tNoisy = new Float32Array(lead + tSig.length + lead);
+  for (let i = 0; i < tNoisy.length; i++) tNoisy[i] = 0.02 * rand();
+  for (let i = 0; i < tSig.length; i++) tNoisy[lead + i] += tSig[i];
+  const tRes = decodeAuto(tNoisy, sampleRate);
+  if (tRes.error) throw new Error("ТУРБО: " + tRes.error);
+  if (!tRes.params.bands || tRes.params.bands !== 4) throw new Error("ТУРБО: полосы не согласовались");
+  const tFrameRx = parseFrame(bitsToBytes(tRes.bits));
+  if (!tFrameRx.shaOk) throw new Error("ТУРБО: SHA-256 не сошёлся");
+  console.log(`ТУРБО OK: 4×16 тонов · 50 мс · ${Math.round(tP.bps * 1000 / tP.symbolMs)} бит/с — файл восстановлен`);
+
+  // FEC: портим байт в блоке №1 прямо в кадре — чётность должна починить
+  const cf = tFrame.slice();
+  cf[46 + 9 + 1 * (64 + 4) + 10] ^= 0xff; // заголовок 55 Б ("turbo.bin"), блок 1 (64 Б + CRC32), байт 10
+  const recRes = parseFrame(cf);
+  if (!recRes.shaOk || recRes.recovered.length !== 1) throw new Error("FEC: восстановление не сработало");
+  // а если чётность е��ё не дошла — кадр с ошибками не должен считаться завершённым
+  const pend = parseFrame(cf.slice(0, cf.length - 20));
+  if (!pend.fecPending) throw new Error("FEC: обрезанная чётность не помечена как ожидаемая");
+  console.log("FEC OK: побитый блок восстановлен XOR-чётностью, SHA-256 подтверждён");
+}

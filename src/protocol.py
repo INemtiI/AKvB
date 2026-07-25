@@ -33,6 +33,8 @@ MAGIC = b"AM01"
 BLOCK_SIZE = 64
 FLAG_TEXT = 0x01
 FLAG_ASCII7 = 0x02  # текст упакован по 7 бит на символ (только ASCII)
+FLAG_FEC = 0x04     # после блоков данных идут блоки XOR-чётности (восстановление ошибок)
+FEC_GROUP = 8       # блоков данных на один блок чётности (накладные ~12.5%)
 
 
 def bytes_to_bits(data: bytes) -> list[int]:
@@ -57,13 +59,15 @@ def bits_to_bytes(bits: list[int]) -> bytes:
 
 
 def build_frame(filename: str, payload: bytes, is_text: bool = False,
-                is_ascii7: bool = False) -> bytes:
-    """Собирает кадр: заголовок + блоки с CRC32."""
+                is_ascii7: bool = False, fec: bool = False) -> bytes:
+    """Собирает кадр: заголовок + блоки с CRC32 (+ блоки XOR-чётности при fec=True)."""
     name_bytes = filename.encode("utf-8")
     if len(name_bytes) > 255:
         raise ValueError("Слишком длинное имя файла (максимум 255 байт в UTF-8)")
 
-    flags = (FLAG_TEXT if is_text else 0) | (FLAG_ASCII7 if is_ascii7 else 0)
+    has_fec = fec and len(payload) > 0
+    flags = ((FLAG_TEXT if is_text else 0) | (FLAG_ASCII7 if is_ascii7 else 0)
+             | (FLAG_FEC if has_fec else 0))
     header = (
         MAGIC
         + bytes([flags, len(name_bytes)])
@@ -79,15 +83,30 @@ def build_frame(filename: str, payload: bytes, is_text: bool = False,
         body += block
         body += zlib.crc32(block).to_bytes(4, "big")
 
+    if has_fec:
+        # XOR-чётность: на каждые FEC_GROUP блоков данных — один блок чётности
+        # (64 байта, короткий последний блок дополняется нулями).
+        # Приёмник восстановит ЛЮБОЙ один побитый блок в группе.
+        blocks = [payload[i:i + BLOCK_SIZE] for i in range(0, len(payload), BLOCK_SIZE)]
+        for g in range(0, len(blocks), FEC_GROUP):
+            parity = bytearray(BLOCK_SIZE)
+            for block in blocks[g:g + FEC_GROUP]:
+                for j, byte in enumerate(block):
+                    parity[j] ^= byte
+            body += parity
+            body += zlib.crc32(bytes(parity)).to_bytes(4, "big")
+
     return header + bytes(body)
 
 
-def frame_overhead(filename: str, payload_len: int) -> int:
+def frame_overhead(filename: str, payload_len: int, fec: bool = False) -> int:
     """Сколько служебных байт добавит кадр (для оценки времени передачи)."""
     name_len = len(filename.encode("utf-8"))
     header = 4 + 1 + 1 + 4 + 32 + name_len + 4
     block_count = (payload_len + BLOCK_SIZE - 1) // BLOCK_SIZE
-    return header + block_count * 4
+    parity = (((block_count + FEC_GROUP - 1) // FEC_GROUP) * (BLOCK_SIZE + 4)
+              if fec and payload_len else 0)
+    return header + block_count * 4 + parity
 
 
 class FrameError(Exception):
@@ -152,6 +171,41 @@ def parse_frame(data: bytes) -> dict:
         payload += block
         offset = end
 
+    has_fec = bool(flags & FLAG_FEC)
+    fec_pending = False
+    recovered_blocks: list[int] = []
+    if has_fec and not truncated and total_blocks:
+        parity_count = (total_blocks + FEC_GROUP - 1) // FEC_GROUP
+        parities = []
+        for gi in range(parity_count):
+            p_off = offset + gi * (BLOCK_SIZE + 4)
+            p_end = p_off + BLOCK_SIZE + 4
+            if len(data) < p_end:
+                fec_pending = True  # чётность ещё не дошла (важно для авто-стопа)
+                parities.append(None)
+                continue
+            pblock = data[p_off:p_off + BLOCK_SIZE]
+            pcrc = int.from_bytes(data[p_off + BLOCK_SIZE:p_end], "big")
+            parities.append(pblock if zlib.crc32(pblock) == pcrc else None)
+        for gi, pblock in enumerate(parities):
+            if pblock is None or not bad_blocks:
+                continue
+            group = range(gi * FEC_GROUP, min((gi + 1) * FEC_GROUP, total_blocks))
+            bad_in_group = [b for b in group if b in bad_blocks]
+            if len(bad_in_group) != 1:
+                continue  # XOR-чётность чинит ровно один блок в группе
+            bad = bad_in_group[0]
+            rec = bytearray(pblock)
+            for b in group:
+                if b == bad:
+                    continue
+                for j, byte in enumerate(payload[b * BLOCK_SIZE:b * BLOCK_SIZE + BLOCK_SIZE]):
+                    rec[j] ^= byte
+            bad_len = min(BLOCK_SIZE, payload_len - bad * BLOCK_SIZE)
+            payload[bad * BLOCK_SIZE:bad * BLOCK_SIZE + bad_len] = rec[:bad_len]
+            bad_blocks.remove(bad)
+            recovered_blocks.append(bad)
+
     sha_ok = (
         not truncated
         and len(payload) == payload_len
@@ -167,6 +221,9 @@ def parse_frame(data: bytes) -> dict:
         "total_blocks": total_blocks,
         "bad_blocks": bad_blocks,
         "truncated": truncated,
+        "fec": has_fec,
+        "fec_pending": fec_pending,
+        "recovered_blocks": recovered_blocks,
         "sha_ok": sha_ok,
     }
 

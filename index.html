@@ -3,7 +3,7 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>AKvB — анчоусы кричат в банку</title>
+<title>AM·01 — акустический модем</title>
 <style>
 :root {
   --bg: #0a0e0b;
@@ -152,7 +152,7 @@ footer b { color: var(--ink); font-weight: 400; }
 <div class="wrap">
 
 <header>
-  <div class="logo">AKvB<small>анчоусы кричат в банку</small></div>
+  <div class="logo">AM·01<small>акустический модем</small></div>
   <div class="led on-idle" id="led"><i></i><span id="ledText">ГОТОВ</span></div>
 </header>
 
@@ -202,7 +202,9 @@ footer b { color: var(--ink); font-weight: 400; }
       <option value="2">2-FSK · медленно, максимально надёжно</option>
       <option value="4" selected>4-FSK · проверен в воздухе</option>
       <option value="8">8-FSK · быстро, требует тишины</option>
-      <option value="16">16-FSK · максимум скорости (сетка ultra)</option>
+      <option value="16">16-FSK · максимум скорости одной полосы (сетка ultra)</option>
+      <option value="t4">ТУРБО ×4 · 4 полосы × 16 тонов · ~320 бит/с</option>
+      <option value="t6">ТУРБО ×6 · 6 полос × 16 тонов · ~480 бит/с</option>
     </select>
   </div>
   <label class="fld">МС / СИМВОЛ</label>
@@ -217,14 +219,15 @@ footer b { color: var(--ink); font-weight: 400; }
       <option value="wide">wide · 1200+380·k / маркер 4300 (для 8-FSK)</option>
       <option value="high">high · 2000+400·k / маркер 5300</option>
       <option value="ultra">ultra · 1400+260·k / маркер 6100 (для 16-FSK)</option>
+      <option value="turbo">turbo · 1400+150·k / маркер 1000 (ТУРБО-полосы)</option>
     </select>
   </div>
   <details class="adv">
     <summary>ЧАСТОТЫ ВРУЧНУЮ</summary>
     <div class="row3">
-      <label>базовая, Гц <input type="number" id="fBase" min="500" max="8000"></label>
+      <label>базовая, Гц <input type="number" id="fBase" min="500" max="16000"></label>
       <label>шаг, Гц <input type="number" id="fStep" min="100" max="2000"></label>
-      <label>маркер, Гц <input type="number" id="fMarker" min="500" max="8000"></label>
+      <label>маркер, Гц <input type="number" id="fMarker" min="500" max="16000"></label>
     </div>
   </details>
 
@@ -243,6 +246,12 @@ footer b { color: var(--ink); font-weight: 400; }
   <a class="dl" id="dlLink">⤓ СОХРАНИТЬ ФАЙЛ</a>
 </section>
 
+<footer>
+  2/4/8/16-FSK и ТУРБО-полосы (до 480 бит/с) · FEC: XOR-чётность · авто-согласование режима служебной посылкой<br>
+  кадр <b>AM01</b>: имя + размер + SHA-256, блоки 64 Б с CRC32 · совместим с python-версией<br>
+  работает полностью офлайн · никаких внешних запросов
+</footer>
+
 </div>
 <script>
 "use strict";
@@ -254,11 +263,13 @@ const PRESETS = {
   wide:     { base: 1200, step: 380, marker: 4300 }, // широкая сетка под 8-FSK
   high:     { base: 2000, step: 400, marker: 5300 }, // верхний диапазон
   ultra:    { base: 1400, step: 260, marker: 6100 }, // сетка под 16-FSK (тона 1400..5300)
+  turbo:    { base: 1400, step: 150, marker: 1000 }, // ТУРБО-полосы: маркер ВНИЗУ, тона 1400+150·k
 };
-function makeParams(tones, symbolMs, base, step, marker) {
+function makeParams(tones, symbolMs, base, step, marker, bands = 1) {
   const freqs = [];
-  for (let i = 0; i < tones; i++) freqs.push(base + i * step);
-  return { tones, symbolMs, base, step, marker, freqs, bps: { 2: 1, 4: 2, 8: 3, 16: 4 }[tones], symDur: symbolMs / 1000 };
+  for (let i = 0; i < bands * tones; i++) freqs.push(base + i * step);
+  const bpb = { 2: 1, 4: 2, 8: 3, 16: 4 }[tones];
+  return { tones, symbolMs, base, step, marker, bands, freqs, bpb, bps: bands * bpb, symDur: symbolMs / 1000 };
 }
 const CANON = makeParams(4, 100, 1500, 400, 3500); // базовый режим для служебной посылки — НЕ МЕНЯТЬ
 const SYMBOL_DURATION = CANON.symDur;
@@ -268,6 +279,8 @@ const MAGIC = [0x41, 0x4D, 0x30, 0x31]; // "AM01"
 const BLOCK_SIZE = 64;
 const FLAG_TEXT = 0x01;
 const FLAG_ASCII7 = 0x02; // текст упакован по 7 бит на символ (только ASCII)
+const FLAG_FEC = 0x04;    // после блоков данных идут блоки XOR-чётности
+const FEC_GROUP = 8;      // блоков данных на один блок чётности (~12.5% накладных)
 
 // ─── CRC32 ───
 const CRC_TABLE = (() => {
@@ -372,11 +385,12 @@ function unpackAscii7(bytes) {
   return s.replace(/\u0000+$/, "");
 }
 
-function buildFrame(filename, payload, isText, isAscii7) {
+function buildFrame(filename, payload, isText, isAscii7, fec = true) {
   const nameBytes = new TextEncoder().encode(filename);
+  const hasFec = !!(fec && payload.length);
   const header = new Uint8Array(4 + 1 + 1 + 4 + 32 + nameBytes.length);
   header.set(MAGIC, 0);
-  header[4] = (isText ? FLAG_TEXT : 0) | (isAscii7 ? FLAG_ASCII7 : 0);
+  header[4] = (isText ? FLAG_TEXT : 0) | (isAscii7 ? FLAG_ASCII7 : 0) | (hasFec ? FLAG_FEC : 0);
   header[5] = nameBytes.length;
   new DataView(header.buffer).setUint32(6, payload.length);
   header.set(sha256(payload), 10);
@@ -389,6 +403,18 @@ function buildFrame(filename, payload, isText, isAscii7) {
     const bcrc = new Uint8Array(4);
     new DataView(bcrc.buffer).setUint32(0, crc32(block));
     parts.push(block, bcrc);
+  }
+  if (hasFec) {
+    // XOR-чётность: на каждые FEC_GROUP блоков — блок чётности:
+    // приёмник восстановит любой ОДИН побитый блок в группе
+    for (let g = 0; g < payload.length; g += BLOCK_SIZE * FEC_GROUP) {
+      const parity = new Uint8Array(BLOCK_SIZE);
+      const gEnd = Math.min(g + BLOCK_SIZE * FEC_GROUP, payload.length);
+      for (let j = g; j < gEnd; j++) parity[(j - g) % BLOCK_SIZE] ^= payload[j];
+      const pcrc = new Uint8Array(4);
+      new DataView(pcrc.buffer).setUint32(0, crc32(parity));
+      parts.push(parity, pcrc);
+    }
   }
   const total = parts.reduce((s, p) => s + p.length, 0);
   const frame = new Uint8Array(total);
@@ -436,16 +462,47 @@ function parseFrame(data) {
     written += blockLen;
     offset = end;
   }
+  const hasFec = !!(flags & FLAG_FEC);
+  let fecPending = false;
+  const recovered = [];
+  if (hasFec && !truncated && totalBlocks) {
+    const parityCount = Math.ceil(totalBlocks / FEC_GROUP);
+    const parities = [];
+    for (let gi = 0; gi < parityCount; gi++) {
+      const pOff = offset + gi * (BLOCK_SIZE + 4);
+      if (data.length < pOff + BLOCK_SIZE + 4) { fecPending = true; parities.push(null); continue; }
+      const pblock = data.slice(pOff, pOff + BLOCK_SIZE);
+      const pcrc = new DataView(data.buffer, data.byteOffset + pOff + BLOCK_SIZE, 4).getUint32(0);
+      parities.push(crc32(pblock) === pcrc ? pblock : null);
+    }
+    for (let gi = 0; gi < parities.length; gi++) {
+      if (!parities[gi] || !badBlocks.length) continue;
+      const from = gi * FEC_GROUP, to = Math.min(from + FEC_GROUP, totalBlocks);
+      const badInGroup = badBlocks.filter(b => b >= from && b < to);
+      if (badInGroup.length !== 1) continue; // XOR чинит ровно один блок в группе
+      const bad = badInGroup[0];
+      const rec = parities[gi].slice();
+      for (let b = from; b < to; b++) {
+        if (b === bad) continue;
+        const s0 = b * BLOCK_SIZE, e0 = Math.min(s0 + BLOCK_SIZE, payloadLen);
+        for (let j = s0; j < e0; j++) rec[j - s0] ^= payload[j];
+      }
+      const badLen = Math.min(BLOCK_SIZE, payloadLen - bad * BLOCK_SIZE);
+      payload.set(rec.slice(0, badLen), bad * BLOCK_SIZE);
+      badBlocks.splice(badBlocks.indexOf(bad), 1);
+      recovered.push(bad);
+    }
+  }
   const shaActual = sha256(payload);
   const shaOk = !truncated && written === payloadLen && shaActual.every((v, i) => v === shaExpected[i]);
-  return { filename, isText: !!(flags & FLAG_TEXT), isAscii7: !!(flags & FLAG_ASCII7), payload, totalBlocks, badBlocks, truncated, shaOk };
+  return { filename, isText: !!(flags & FLAG_TEXT), isAscii7: !!(flags & FLAG_ASCII7), payload, totalBlocks, badBlocks, truncated, fec: hasFec, fecPending, recovered, shaOk };
 }
 
 // ─── Служебная посылка CFG: объявление параметров (зеркало phy.py) ───
 function packConfig(p) {
   const b = new Uint8Array(CFG_LEN);
   b[0] = 0x41; b[1] = 0x43; // "AC"
-  b[2] = p.tones;
+  b[2] = p.tones + ((p.bands || 1) - 1) * 32; // старшие 3 бита — число полос минус 1 (ТУРБО)
   const dv = new DataView(b.buffer);
   dv.setUint16(3, p.symbolMs);
   dv.setUint16(5, p.base);
@@ -459,9 +516,10 @@ function unpackConfig(data) {
   if (data.length < CFG_LEN || data[0] !== 0x41 || data[1] !== 0x43) return null;
   const dv = new DataView(data.buffer, data.byteOffset);
   if (crc32(data.slice(0, 11)) !== dv.getUint32(11)) return null;
-  const tones = data[2];
+  const bands = (data[2] >> 5) + 1, tones = data[2] & 31;
   if (tones !== 2 && tones !== 4 && tones !== 8 && tones !== 16) return null;
-  return makeParams(tones, dv.getUint16(3), dv.getUint16(5), dv.getUint16(7), dv.getUint16(9));
+  if (bands < 1 || bands > 6) return null;
+  return makeParams(tones, dv.getUint16(3), dv.getUint16(5), dv.getUint16(7), dv.getUint16(9), bands);
 }
 
 // ─── Модулятор (зеркало phy.py) ───
@@ -474,6 +532,31 @@ function createTone(samples, freq, sampleRate, volume, out, offset) {
     out[offset + i] = v;
   }
   return offset + samples;
+}
+
+function createMultiTone(samples, freqs, sampleRate, volume, out, offset) {
+  // ТУРБО: несколько тонов одновременно (по одному на полосу), амплитуда делится на число полос
+  const fade = Math.min(Math.round(0.005 * sampleRate), samples >> 2);
+  const amp = volume / freqs.length;
+  for (let i = 0; i < samples; i++) {
+    let v = 0;
+    for (const f of freqs) v += amp * Math.sin(2 * Math.PI * f * i / sampleRate);
+    if (i < fade) v *= i / fade;
+    if (i >= samples - fade) v *= (samples - 1 - i) / fade;
+    out[offset + i] = v;
+  }
+  return offset + samples;
+}
+
+function symbolFreqs(s, p) {
+  // частоты символа: для bands=1 — просто тон, для ТУРБО — по тону на каждую полосу (старшие биты — полоса 0)
+  if (!p.bands || p.bands === 1) return p.freqs[s];
+  const fr = [];
+  for (let b = 0; b < p.bands; b++) {
+    const sub = (s >> ((p.bands - 1 - b) * p.bpb)) & (p.tones - 1);
+    fr.push(p.freqs[b * p.tones + sub]);
+  }
+  return fr;
 }
 
 function symbolsOf(bytes, p) {
@@ -494,7 +577,8 @@ function synth(parts, sampleRate, volume) {
   let off = 0;
   for (const q of parts) {
     const n = Math.round(q.d * sampleRate);
-    if (q.f) createTone(n, q.f, sampleRate, volume, out, off);
+    if (Array.isArray(q.f)) createMultiTone(n, q.f, sampleRate, volume, out, off);
+    else if (q.f) createTone(n, q.f, sampleRate, volume, out, off);
     off += n;
   }
   return out;
@@ -503,7 +587,7 @@ function synth(parts, sampleRate, volume) {
 // Старый формат без служебной посылки (для тестов и совместимост��)
 function buildSignal(frame, sampleRate, volume, p = CANON) {
   const parts = [{ f: 0, d: 0.5 }, { f: p.marker, d: MARKER_DURATION }];
-  for (const s of symbolsOf(frame, p)) parts.push({ f: p.freqs[s], d: p.symDur });
+  for (const s of symbolsOf(frame, p)) parts.push({ f: symbolFreqs(s, p), d: p.symDur });
   parts.push({ f: p.marker, d: MARKER_DURATION }, { f: 0, d: 0.3 });
   return synth(parts, sampleRate, volume);
 }
@@ -513,7 +597,7 @@ function buildNegoSignal(frame, sampleRate, volume, p) {
   const parts = [{ f: 0, d: 0.5 }, { f: CANON.marker, d: MARKER_DURATION }];
   for (const s of symbolsOf(packConfig(p), CANON)) parts.push({ f: CANON.freqs[s], d: CANON.symDur });
   parts.push({ f: CANON.marker, d: MARKER_DURATION }, { f: p.marker, d: MARKER_DURATION });
-  for (const s of symbolsOf(frame, p)) parts.push({ f: p.freqs[s], d: p.symDur });
+  for (const s of symbolsOf(frame, p)) parts.push({ f: symbolFreqs(s, p), d: p.symDur });
   parts.push({ f: p.marker, d: MARKER_DURATION }, { f: 0, d: 0.3 });
   return synth(parts, sampleRate, volume);
 }
@@ -531,11 +615,41 @@ function toneEnergy(signal, start, len, freq, sampleRate) {
 }
 
 function classify(signal, start, len, sampleRate, p = CANON) {
+  // в каждой полосе — argmax своих тонов, биты склеиваются (для bands=1 — как раньше)
   const energies = p.freqs.map(f => toneEnergy(signal, start, len, f, sampleRate));
   const markerE = toneEnergy(signal, start, len, p.marker, sampleRate);
-  let best = 0;
-  for (let i = 1; i < energies.length; i++) if (energies[i] > energies[best]) best = i;
-  return { result: markerE > energies[best] ? "marker" : best, energies, markerE };
+  const bands = p.bands || 1, bpb = p.bpb || p.bps;
+  let value = 0, peak = 0;
+  for (let b = 0; b < bands; b++) {
+    let k = 0;
+    for (let i = 1; i < p.tones; i++) if (energies[b * p.tones + i] > energies[b * p.tones + k]) k = i;
+    value = (value << bpb) | k;
+    if (energies[b * p.tones + k] > peak) peak = energies[b * p.tones + k];
+  }
+  return { result: markerE > peak ? "marker" : value, energies, markerE };
+}
+
+function bandSeparation(energies, p) {
+  // средний по полосам отрыв победителя от второго места (0..1)
+  const bands = p.bands || 1;
+  let sum = 0;
+  for (let b = 0; b < bands; b++) {
+    const band = energies.slice(b * p.tones, (b + 1) * p.tones).sort((x, y) => y - x);
+    sum += (band[0] - band[1]) / (band[0] + band[1] + 1e-12);
+  }
+  return sum / bands;
+}
+
+function bandQuality(energies, markerE, p) {
+  // средняя по полосам чистота символа (для следящего декодера)
+  const bands = p.bands || 1;
+  let sum = 0;
+  for (let b = 0; b < bands; b++) {
+    const band = energies.slice(b * p.tones, (b + 1) * p.tones).sort((x, y) => y - x);
+    const second = band.length > 1 ? band[1] : 0;
+    sum += band[0] / (second + markerE + 1e-12);
+  }
+  return sum / bands;
 }
 
 function rms(signal, start, len) {
@@ -585,8 +699,7 @@ function refineDataStart(signal, coarseStart, sampleRate, p = CANON) {
     while (position + symSamples <= signal.length && count < 16) {
       const c = classify(signal, position + guard, symSamples - 2 * guard, sampleRate, p);
       if (c.result === "marker") break;
-      const ordered = [...c.energies].sort((a, b) => b - a);
-      score += (ordered[0] - ordered[1]) / (ordered[0] + ordered[1] + 1e-12);
+      score += bandSeparation(c.energies, p);
       count++;
       position += symSamples;
     }
@@ -621,10 +734,7 @@ function decodeSymbols(signal, start, sampleRate, p) {
       if (s0 < 0 || s0 + symSamples > signal.length) continue;
       const c2 = classify(signal, s0 + guard, segLen, sampleRate, p);
       if (c2.result === "marker") continue;
-      const top = c2.energies[c2.result];
-      const others = c2.energies.slice().sort((a, b) => b - a);
-      const second = others.length > 1 ? others[1] : 0;
-      const score = top / (second + c2.markerE + 1e-12);
+      const score = bandQuality(c2.energies, c2.markerE, p);
       if (score > bestScore) { bestScore = score; bestOff = off; bestResult = c2.result; }
     }
     for (let shift = p.bps - 1; shift >= 0; shift--) bits.push((bestResult >> shift) & 1);
@@ -654,23 +764,40 @@ function decodeAuto(signal, sampleRate) {
   return { params: p, bits: decodeSymbols(signal, start2, sampleRate, p).bits, legacy: false };
 }
 
+// ── авто-стоп записи: возвращает разобранный кадр, если он уже принят целиком ──
+function tryDecodeComplete(signal, sampleRate) {
+  const res = decodeAuto(signal, sampleRate);
+  if (res.error || !res.bits || !res.bits.length) return null;
+  try {
+    const frame = parseFrame(bitsToBytes(res.bits));
+    if (frame.truncated) return null;  // обрыв — ждём дальше
+    if (frame.shaOk) return frame;     // файл уже цел — чётность можно не ждать
+    if (frame.fec && frame.fecPending) return null; // ждём XOR-чётность для починки
+    return frame;
+  } catch (e) {
+    return null; // заголовок ещё не дошёл/повреждён — продолжаем запись
+  }
+}
+
 function validateParams(p) {
   const errors = [], warnings = [];
   if (p.symbolMs < 20 || p.symbolMs > 500) errors.push("длительность символа: 20–500 мс");
   if (p.base < 500) errors.push("нижний тон ниже 500 Гц — встроенные динамики его почти не играют");
-  if (Math.max(...p.freqs, p.marker) > 8000) errors.push("частоты выше 8 кГц ненадёжны для встроенного аудио");
+  if (Math.max(...p.freqs, p.marker) > 16500) errors.push("частоты выше 16.5 кГц не пройдут через встроенное аудио");
   for (const f of p.freqs) if (Math.abs(f - p.marker) < 300) errors.push(`тон ${f} Гц слишком близко к маркеру ${p.marker} Гц (нужно ≥300 Гц)`);
   if (errors.length) return { errors, warnings };
   const minStep = Math.round(2000 / p.symbolMs) + 100;
   if (p.step < minStep) warnings.push(`шаг ${p.step} Гц мал для ${p.symbolMs} мс/символ (лучше ≥${minStep} Гц)`);
   if (p.symbolMs < 50) warnings.push("меньше 50 мс/символ на встроенных динамиках часто сбоит");
+  if (Math.max(...p.freqs) > 9000) warnings.push("тона выше 9 кГц — встроенные динамики играют их тихо, держите устройства ближе (20–40 см)");
   for (const f of p.freqs) for (const k of [2, 3, 4])
     if (Math.abs(k * f - p.marker) < 100) warnings.push(`маркер ${p.marker} Гц ≈ ${k}-я гармоника тона ${f} Гц — возможны ложные маркеры`);
   return { errors, warnings };
 }
 
 function describeParams(p) {
-  return `${p.tones}-FSK · ${p.symbolMs} мс/символ · тона ${p.base}+${p.step}·k Гц (${p.freqs[0]}–${p.freqs[p.freqs.length - 1]}) · маркер ${p.marker} Гц · ${Math.round(p.bps * 1000 / p.symbolMs)} бит/с`;
+  const mode = (p.bands || 1) > 1 ? `ТУРБО ${p.bands}×${p.tones}` : `${p.tones}-FSK`;
+  return `${mode} · ${p.symbolMs} мс/символ · тона ${p.base}+${p.step}·k Гц (${p.freqs[0]}–${p.freqs[p.freqs.length - 1]}) · маркер ${p.marker} Гц · ${Math.round(p.bps * 1000 / p.symbolMs)} бит/с`;
 }
 
 // ────────────── UI ──────────────
@@ -717,6 +844,10 @@ if (!isNode) {
       $("selPreset").value = "ultra"; // 16 тонов помещаются только в сетку ultra
       syncPlaceholders();
     }
+    if ($("selMode").value[0] === "t") { // ТУРБО: сетка turbo + 50 мс/символ
+      if ($("selPreset").value !== "turbo") { $("selPreset").value = "turbo"; syncPlaceholders(); }
+      if (parseInt($("symMs").value, 10) > 50) { $("symMs").value = "50"; $("symMsVal").textContent = "50"; }
+    }
     updateMeta();
   };
   $("selPreset").onchange = () => { syncPlaceholders(); updateMeta(); };
@@ -734,12 +865,15 @@ if (!isNode) {
 
   function currentParams() {
     const pr = PRESETS[$("selPreset").value];
+    const v = $("selMode").value;
+    const turbo = v[0] === "t";
     return makeParams(
-      parseInt($("selMode").value, 10),
+      turbo ? 16 : parseInt(v, 10),
       parseInt($("symMs").value, 10),
       parseInt($("fBase").value, 10) || pr.base,
       parseInt($("fStep").value, 10) || pr.step,
       parseInt($("fMarker").value, 10) || pr.marker,
+      turbo ? parseInt(v.slice(1), 10) : 1,
     );
   }
 
@@ -758,7 +892,8 @@ if (!isNode) {
   $("txText").oninput = updateMeta;
 
   function estimate(payloadLen, nameLen, p) {
-    const frameBytes = 46 + nameLen + payloadLen + 4 * Math.ceil(payloadLen / BLOCK_SIZE);
+    const frameBytes = 46 + nameLen + payloadLen + 4 * Math.ceil(payloadLen / BLOCK_SIZE)
+      + (payloadLen ? Math.ceil(payloadLen / BLOCK_SIZE / FEC_GROUP) * (BLOCK_SIZE + 4) : 0); // + XOR-чётность
     const cfgSymbols = Math.ceil(CFG_LEN * 8 / CANON.bps);
     const dataSymbols = Math.ceil(frameBytes * 8 / p.bps);
     const seconds = 0.8 + MARKER_DURATION * 3 + cfgSymbols * CANON.symDur + dataSymbols * p.symDur;
@@ -885,6 +1020,7 @@ if (!isNode) {
   let recCtx = null, recStream = null, recNode = null, analyser = null;
   let recChunks = [], recording = false, vizRaf = 0, recT0 = 0;
 
+
   const viz = $("viz"), vctx = viz.getContext("2d");
 
   function drawIdleViz() {
@@ -904,7 +1040,7 @@ if (!isNode) {
     const freqData = new Uint8Array(n);
     analyser.getByteFrequencyData(freqData);
     const sr = recCtx.sampleRate;
-    const fMin = 800, fMax = 4200;
+    const fMin = 600, fMax = 16000; // видно и ТУРБО-полосы до ~15.7 кГц
     const iMin = Math.floor(fMin / (sr / 2) * n), iMax = Math.ceil(fMax / (sr / 2) * n);
     vctx.fillStyle = "#080c09";
     vctx.fillRect(0, 0, viz.width, viz.height);
@@ -958,7 +1094,7 @@ if (!isNode) {
       $("btnRec").classList.add("rec");
       $("dlLink").style.display = "none";
       setLed("rec", "ЗАПИСЬ");
-      log(rxLog, `запись пошла @ ${recCtx.sampleRate} Гц — запускайте передатчик`);
+      log(rxLog, `запись пошла @ ${recCtx.sampleRate} Гц — запускайте передатчик, когда будете готовы`);
       drawViz();
     } else {
       recording = false;
@@ -1002,6 +1138,7 @@ if (!isNode) {
     try {
       const r = parseFrame(data);
       log(rxLog, `файл «${r.filename}» · ${r.payload.length} Б · блоки ${r.totalBlocks - r.badBlocks.length}/${r.totalBlocks}`);
+      if (r.recovered && r.recovered.length) log(rxLog, "FEC: блоки " + r.recovered.join(", ") + " восстановлены XOR-чётностью", "ok");
       if (r.badBlocks.length) log(rxLog, "повреждены блоки: " + r.badBlocks.join(", "), "warn");
       if (r.truncated) log(rxLog, "передача оборвалась раньше конца", "warn");
       if (r.shaOk) log(rxLog, "SHA-256 совпал — файл восстановлен байт-в-байт ✓", "ok");

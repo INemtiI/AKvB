@@ -1,0 +1,6 @@
+__pycache__/
+*.pyc
+received/
+recording.wav
+frame_from_js.bin
+.DS_Store

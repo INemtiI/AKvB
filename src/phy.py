@@ -1,12 +1,18 @@
 """
-phy.py — настраиваемый физический уровень: 2/4/8-FSK, любая длительность
-символа, настраиваемые частоты + АВТО-СОГЛАСОВАНИЕ параметров.
+phy.py — настраиваемый физический уровень: 2/4/8/16-FSK, любая длительность
+символа, настраиваемые частоты, ПАРАЛЛЕЛЬНЫЕ ПОЛОСЫ (ТУРБО) + АВТО-СОГЛАСОВАНИЕ.
 
 Как устройства договариваются:
   Передатчик всегда начинает с короткой служебной посылки (CFG, 15 байт)
   в БАЗОВОМ режиме (4-FSK, 100 мс, 1500+400·k Гц, маркер 3500 — проверен в
   воздухе). В ней — параметры основной передачи. Приёмник читает CFG и сам
   переключается на объявленный режим. Никаких ручных настроек на приёме.
+
+ТУРБО-режим (bands > 1):
+  Спектр делится на bands независимых полос по tones тонов; в каждый момент
+  звучит bands тонов ОДНОВРЕМЕННО (по одному на полосу). Скорость растёт в
+  bands раз: 6 полос × 16-FSK @ 50 мс = 480 бит/с. Маркер данных в пресете
+  turbo вынесен ВНИЗ (1000 Гц) — ниже всех тонов данных.
 
 Структура эфира:
   [тишина] [маркер 3500] [CFG @ базовый] [маркер 3500] [маркер P] [ДАННЫЕ @ P] [маркер P]
@@ -24,7 +30,7 @@ MARKER_DURATION = 0.5
 CFG_MAGIC = b"AC"
 CFG_LEN = 15
 
-#: Пресеты частот: тона = base + k*step, k = 0..tones-1
+#: Пресеты частот: тона = base + k*step, k = 0..bands*tones-1
 PRESETS = {
     # Проверен в реальном воздухе. Только для 2/4-FSK
     # (при 8-FSK тон №5 попадает ровно в маркер 3500).
@@ -37,24 +43,33 @@ PRESETS = {
     # Сетка под 16-FSK: 16 тонов 1400..5300 Гц, маркер вынесен на 6100
     # (расстояние до тонов 800 Гц, гармоники 2f/3f/4f всех тонов проверены).
     "ultra": dict(base=1400, step=260, marker=6100),
+    # ТУРБО-полосы: до 6×16 = 96 тонов 1400..15650 Гц, маркер вынесен ВНИЗ
+    # (1000 Гц) — ниже всех тонов, чтобы не пересекаться ни с одной полосой.
+    "turbo": dict(base=1400, step=150, marker=1000),
 }
 
 
 @dataclass(frozen=True)
 class ModemParams:
-    tones: int = 4        # 2 / 4 / 8 / 16
+    tones: int = 4        # тонов НА ПОЛОСУ: 2 / 4 / 8 / 16
     symbol_ms: int = 100  # длительность символа, мс
     base: int = 1500      # частота первого тона, Гц
     step: int = 400       # шаг между тонами, Гц
     marker: int = 3500    # частота маркера, Гц
+    bands: int = 1        # параллельных частотных полос (ТУРБО при >1)
 
     @property
     def freqs(self) -> list:
-        return [self.base + i * self.step for i in range(self.tones)]
+        """Все тона всех полос подряд: полоса b владеет индексами [b*tones, (b+1)*tones)."""
+        return [self.base + i * self.step for i in range(self.bands * self.tones)]
+
+    @property
+    def bits_per_band(self) -> int:
+        return {2: 1, 4: 2, 8: 3, 16: 4}[self.tones]
 
     @property
     def bits_per_symbol(self) -> int:
-        return {2: 1, 4: 2, 8: 3, 16: 4}[self.tones]
+        return self.bands * self.bits_per_band
 
     @property
     def symbol_duration(self) -> float:
@@ -65,7 +80,9 @@ class ModemParams:
         return self.bits_per_symbol * 1000.0 / self.symbol_ms
 
     def describe(self) -> str:
-        return (f"{self.tones}-FSK, {self.symbol_ms} мс/символ, тона {self.base}+{self.step}·k Гц"
+        mode = (f"ТУРБО {self.bands}×{self.tones}" if self.bands > 1
+                else f"{self.tones}-FSK")
+        return (f"{mode}, {self.symbol_ms} мс/символ, тона {self.base}+{self.step}·k Гц"
                 f" ({self.freqs[0]}..{self.freqs[-1]}), маркер {self.marker} Гц,"
                 f" {self.bitrate:.0f} бит/с")
 
@@ -82,13 +99,17 @@ def validate(p: ModemParams) -> tuple:
     errors, warnings = [], []
     if p.tones not in (2, 4, 8, 16):
         errors.append("число тонов должно быть 2, 4, 8 или 16")
+    if not 1 <= p.bands <= 6:
+        errors.append("число полос (bands): от 1 до 6")
     if not 20 <= p.symbol_ms <= 500:
         errors.append("длительность символа: от 20 до 500 мс")
-    if p.base < 500:
-        errors.append("нижний тон ниже 500 Гц — встроенные динамики его почти не играют")
+    if p.base < 500 or p.marker < 500:
+        errors.append("частоты ниже 500 Гц встроенные динамики почти не играют")
+    if errors:
+        return errors, warnings
     for f in list(p.freqs) + [p.marker]:
-        if f > 8000:
-            errors.append(f"частота {f} Гц выше 8 кГц — ненадёжно для встроенного аудио")
+        if f > 16500:
+            errors.append(f"частота {f} Гц выше 16.5 кГц — встроенное аудио её не пропустит")
             break
     for f in p.freqs:
         if abs(f - p.marker) < 300:
@@ -104,6 +125,9 @@ def validate(p: ModemParams) -> tuple:
     if p.symbol_ms < 50:
         warnings.append("меньше 50 мс/символ — на встроенных динамиках часто сбоит"
                         " (проверено: 50 мс уже на грани)")
+    if max(p.freqs) > 9000:
+        warnings.append("тона выше 9 кГц — встроенные динамики играют их тихо,"
+                        " держите устройства ближе (20–40 см)")
     for f in p.freqs:
         for k in (2, 3, 4):
             if abs(k * f - p.marker) < 100:
@@ -114,7 +138,8 @@ def validate(p: ModemParams) -> tuple:
 
 
 def make_params(tones: int, symbol_ms: int, preset: str = "standard",
-                base: int = None, step: int = None, marker: int = None) -> ModemParams:
+                base: int = None, step: int = None, marker: int = None,
+                bands: int = 1) -> ModemParams:
     """Собирает параметры из пресета с возможностью точечно переопределить частоты."""
     cfg = PRESETS[preset]
     return ModemParams(
@@ -123,6 +148,7 @@ def make_params(tones: int, symbol_ms: int, preset: str = "standard",
         base=base if base is not None else cfg["base"],
         step=step if step is not None else cfg["step"],
         marker=marker if marker is not None else cfg["marker"],
+        bands=bands,
     )
 
 
@@ -163,7 +189,10 @@ def bits_to_symbols(bits: list, bits_per_symbol: int) -> list:
 # ────────── служебная посылка CFG ──────────
 
 def pack_config(p: ModemParams) -> bytes:
-    body = struct.pack(">2sBHHHH", CFG_MAGIC, p.tones, p.symbol_ms, p.base, p.step, p.marker)
+    # Старшие 3 бита байта режима — число полос минус 1, младшие 5 бит — тона.
+    # Старые значения 2/4/8/16 читаются как 1 полоса: формат обратно совместим.
+    mode_byte = p.tones + (p.bands - 1) * 32
+    body = struct.pack(">2sBHHHH", CFG_MAGIC, mode_byte, p.symbol_ms, p.base, p.step, p.marker)
     return body + struct.pack(">I", zlib.crc32(body))
 
 
@@ -175,8 +204,9 @@ def unpack_config(data: bytes) -> ModemParams:
         raise ConfigError("нет магической последовательности AC")
     if zlib.crc32(body) != crc:
         raise ConfigError("CRC32 служебной посылки не сошёлся")
-    _, tones, symbol_ms, base, step, marker = struct.unpack(">2sBHHHH", body)
-    p = ModemParams(tones, symbol_ms, base, step, marker)
+    _, mode_byte, symbol_ms, base, step, marker = struct.unpack(">2sBHHHH", body)
+    bands, tones = mode_byte // 32 + 1, mode_byte % 32
+    p = ModemParams(tones, symbol_ms, base, step, marker, bands)
     errors, _ = validate(p)
     if errors:
         raise ConfigError("недопустимые параметры: " + "; ".join(errors))
@@ -197,12 +227,38 @@ def create_tone(freq: float, duration: float, volume: float) -> np.ndarray:
     return tone
 
 
+def create_multitone(freqs: list, duration: float, volume: float) -> np.ndarray:
+    """Несколько тонов одновременно (ТУРБО): амплитуда делится на число полос."""
+    n = int(duration * SAMPLE_RATE)
+    t = np.arange(n) / SAMPLE_RATE
+    amp = volume / len(freqs)
+    tone = np.zeros(n, dtype=np.float64)
+    for f in freqs:
+        tone += amp * np.sin(2 * np.pi * f * t)
+    tone = tone.astype(np.float32)
+    fade = min(int(0.005 * SAMPLE_RATE), n // 4)
+    if fade > 0:
+        ramp = np.linspace(0.0, 1.0, fade, dtype=np.float32)
+        tone[:fade] *= ramp
+        tone[-fade:] *= ramp[::-1]
+    return tone
+
+
 def create_silence(duration: float) -> np.ndarray:
     return np.zeros(int(duration * SAMPLE_RATE), dtype=np.float32)
 
 
+def symbol_freqs(value: int, p: ModemParams) -> list:
+    """Частоты символа: по одному тону на каждую полосу (старшие биты — полоса 0)."""
+    freqs = []
+    for b in range(p.bands):
+        sub = (value >> ((p.bands - 1 - b) * p.bits_per_band)) & (p.tones - 1)
+        freqs.append(p.freqs[b * p.tones + sub])
+    return freqs
+
+
 def modulate(data: bytes, p: ModemParams, volume: float) -> np.ndarray:
-    parts = [create_tone(p.freqs[s], p.symbol_duration, volume)
+    parts = [create_multitone(symbol_freqs(s, p), p.symbol_duration, volume)
              for s in bits_to_symbols(bytes_to_bits(data), p.bits_per_symbol)]
     return np.concatenate(parts) if parts else create_silence(0)
 
@@ -241,12 +297,38 @@ def tone_energy(seg: np.ndarray, freq: float) -> float:
 
 
 def classify_segment(seg: np.ndarray, p: ModemParams):
+    """Определяет символ: в каждой полосе — argmax своих тонов, биты склеиваются."""
     energies = [tone_energy(seg, f) for f in p.freqs]
     marker_energy = tone_energy(seg, p.marker)
-    best = int(np.argmax(energies))
-    if marker_energy > energies[best]:
+    value, peak = 0, 0.0
+    for b in range(p.bands):
+        band = energies[b * p.tones:(b + 1) * p.tones]
+        k = int(np.argmax(band))
+        value = (value << p.bits_per_band) | k
+        peak = max(peak, band[k])
+    if marker_energy > peak:
         return "marker", energies, marker_energy
-    return best, energies, marker_energy
+    return value, energies, marker_energy
+
+
+def _band_separation(energies: list, p: ModemParams) -> float:
+    """Средний по полосам отрыв победителя от второго места (0..1)."""
+    total = 0.0
+    for b in range(p.bands):
+        band = sorted(energies[b * p.tones:(b + 1) * p.tones], reverse=True)
+        second = band[1] if len(band) > 1 else 0.0
+        total += (band[0] - second) / (band[0] + second + 1e-12)
+    return total / p.bands
+
+
+def _band_quality(energies: list, marker_energy: float, p: ModemParams) -> float:
+    """Средняя по полосам чистота символа (для следящего декодера)."""
+    total = 0.0
+    for b in range(p.bands):
+        band = sorted(energies[b * p.tones:(b + 1) * p.tones], reverse=True)
+        second = band[1] if len(band) > 1 else 0.0
+        total += band[0] / (second + marker_energy + 1e-12)
+    return total / p.bands
 
 
 def find_data_start(signal: np.ndarray, p: ModemParams, start: int = 0):
@@ -296,8 +378,7 @@ def refine_data_start(signal: np.ndarray, coarse_start: int, p: ModemParams) -> 
             result, energies, _ = classify_segment(signal[position + guard:position + sym - guard], p)
             if result == "marker":
                 break
-            ordered = sorted(energies, reverse=True)
-            score += (ordered[0] - ordered[1]) / (ordered[0] + ordered[1] + 1e-12)
+            score += _band_separation(energies, p)
             count += 1
             position += sym
         if count > 0:
@@ -314,9 +395,9 @@ def decode_symbols(signal: np.ndarray, start: int, p: ModemParams):
 
     Early-late tracking: каждый символ оценивается в трёх положениях окна
     (чуть раньше / по сетке / чуть позже), и сетка сдвигается туда, где
-    победивший тон сильнее всего отрывается от остальных. Это компенсирует
-    расхождение частот дискретизации передатчика и приёмника (clock drift),
-    которое на длинных кадрах уводит жёсткую сетку на соседние символы.
+    победившие тона сильнее всего отрываются от остальных (в среднем по
+    полосам). Это компенсирует расхождение частот дискретизации передатчика
+    и приёмника (clock drift).
     """
     sym = int(p.symbol_duration * SAMPLE_RATE)
     guard = sym // 4
@@ -341,10 +422,7 @@ def decode_symbols(signal: np.ndarray, start: int, p: ModemParams):
             r2, energies, marker_e = classify_segment(seg2, p)
             if r2 == "marker":
                 continue
-            top = energies[r2]
-            others = sorted(energies, reverse=True)
-            second = others[1] if len(others) > 1 else 0.0
-            score = top / (second + marker_e + 1e-12)
+            score = _band_quality(energies, marker_e, p)
             if score > best_score:
                 best_score = score
                 best_off = off
