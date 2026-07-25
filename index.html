@@ -1,0 +1,927 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>AM·01 — акустический модем</title>
+<style>
+:root {
+  --bg: #0a0e0b;
+  --panel: #0f1511;
+  --line: #1d2b21;
+  --ink: #b8cbbd;
+  --dim: #5f7566;
+  --phos: #43d97a;
+  --amber: #e8b25a;
+  --red: #e05a4e;
+  --mono: "SF Mono", "Cascadia Mono", "JetBrains Mono", Consolas, "Liberation Mono", monospace;
+}
+* { box-sizing: border-box; }
+html, body { margin: 0; padding: 0; }
+body {
+  background: var(--bg);
+  color: var(--ink);
+  font-family: var(--mono);
+  font-size: 14px;
+  line-height: 1.5;
+  min-height: 100vh;
+}
+/* едва заметные сканлайны ЭЛТ */
+body::before {
+  content: "";
+  position: fixed; inset: 0;
+  background: repeating-linear-gradient(0deg, transparent 0 2px, rgba(0,0,0,.18) 2px 3px);
+  pointer-events: none; z-index: 9;
+}
+.wrap { max-width: 640px; margin: 0 auto; padding: 20px 14px 40px; }
+
+header {
+  display: flex; align-items: baseline; justify-content: space-between;
+  border-bottom: 1px solid var(--line); padding-bottom: 12px; margin-bottom: 18px;
+}
+.logo { font-size: 20px; font-weight: 700; letter-spacing: .08em; color: var(--phos); }
+.logo small { color: var(--dim); font-weight: 400; font-size: 11px; display: block; letter-spacing: .18em; }
+.led { display: inline-flex; align-items: center; gap: 7px; font-size: 11px; color: var(--dim); letter-spacing: .12em; }
+.led i {
+  width: 9px; height: 9px; border-radius: 50%;
+  background: #26382c; border: 1px solid var(--line); transition: background .2s;
+}
+.led.on-idle i { background: #2f4636; }
+.led.on-tx  i { background: var(--amber); box-shadow: 0 0 8px var(--amber); }
+.led.on-rec i { background: var(--red);   box-shadow: 0 0 8px var(--red); animation: blink 1s steps(2) infinite; }
+@keyframes blink { 50% { opacity: .35; } }
+
+.tabs { display: flex; gap: 0; margin-bottom: -1px; }
+.tabs button {
+  flex: 1; padding: 10px 0; cursor: pointer;
+  font: inherit; letter-spacing: .18em; font-size: 12px;
+  color: var(--dim); background: transparent;
+  border: 1px solid var(--line); border-bottom-color: transparent;
+}
+.tabs button.active { color: var(--phos); background: var(--panel); border-bottom: 1px solid var(--panel); }
+.tabs button:first-child { border-right: none; }
+
+.panel {
+  display: none; background: var(--panel);
+  border: 1px solid var(--line); padding: 18px 16px 16px;
+}
+.panel.active { display: block; }
+
+label.fld { display: block; font-size: 11px; letter-spacing: .16em; color: var(--dim); margin: 14px 0 5px; }
+label.fld:first-child { margin-top: 0; }
+
+textarea {
+  width: 100%; min-height: 72px; resize: vertical;
+  background: #0b100d; color: var(--ink);
+  border: 1px solid var(--line); padding: 9px;
+  font: inherit;
+}
+textarea:focus, .filebtn:focus-within { outline: 1px solid var(--phos); outline-offset: -1px; }
+
+input[type=file] { position: absolute; width: 1px; height: 1px; opacity: 0; }
+.filebtn {
+  display: flex; justify-content: space-between; gap: 10px; cursor: pointer;
+  border: 1px dashed var(--line); padding: 9px 10px; color: var(--dim);
+}
+.filebtn:hover { border-color: var(--dim); }
+.filebtn .fname { color: var(--ink); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.filebtn .x { color: var(--red); padding: 0 4px; display: none; }
+.filebtn.has .x { display: inline; }
+
+.row { display: flex; align-items: center; gap: 12px; }
+input[type=range] { flex: 1; accent-color: var(--phos); }
+.row .val { min-width: 4ch; text-align: right; color: var(--phos); }
+
+select, input[type=number] {
+  background: #0b100d; color: var(--ink);
+  border: 1px solid var(--line); font: inherit; padding: 8px;
+}
+select { flex: 1; min-width: 0; }
+details.adv { margin-top: 14px; border: 1px dashed var(--line); padding: 8px 10px; }
+details.adv summary { cursor: pointer; font-size: 11px; letter-spacing: .16em; color: var(--dim); }
+.row3 { display: flex; gap: 8px; margin-top: 10px; }
+.row3 label { flex: 1; font-size: 11px; color: var(--dim); display: flex; flex-direction: column; gap: 4px; }
+.row3 input { width: 100%; }
+
+.meta { color: var(--dim); font-size: 12px; margin-top: 10px; }
+.meta b { color: var(--ink); font-weight: 400; }
+
+.go {
+  display: block; width: 100%; margin-top: 16px; padding: 13px 0;
+  font: inherit; font-size: 14px; letter-spacing: .22em; cursor: pointer;
+  color: var(--bg); background: var(--phos); border: none;
+}
+.go:hover:not(:disabled) { filter: brightness(1.12); }
+.go:disabled { background: #24352a; color: var(--dim); cursor: default; }
+.go.rec { background: var(--red); color: #fff; }
+
+canvas.viz {
+  display: block; width: 100%; height: 90px; margin-top: 16px;
+  background: #080c09; border: 1px solid var(--line);
+}
+
+.bar { height: 5px; background: #17231b; margin-top: 16px; position: relative; display: none; }
+.bar.show { display: block; }
+.bar i { position: absolute; inset: 0 auto 0 0; width: 0%; background: var(--amber); transition: width .3s linear; }
+
+.term {
+  margin-top: 16px; padding: 10px; min-height: 90px; max-height: 240px; overflow-y: auto;
+  background: #080c09; border: 1px solid var(--line);
+  font-size: 12.5px; white-space: pre-wrap; word-break: break-word;
+}
+.term .t { color: var(--dim); }
+.term .ok { color: var(--phos); }
+.term .err { color: var(--red); }
+.term .warn { color: var(--amber); }
+
+a.dl {
+  display: none; margin-top: 12px; padding: 12px 0; text-align: center;
+  letter-spacing: .18em; font-size: 13px;
+  color: var(--phos); border: 1px solid var(--phos); text-decoration: none;
+}
+a.dl:hover { background: rgba(67,217,122,.08); }
+
+footer {
+  margin-top: 22px; padding-top: 12px; border-top: 1px solid var(--line);
+  color: var(--dim); font-size: 11px; letter-spacing: .1em; line-height: 1.9;
+}
+footer b { color: var(--ink); font-weight: 400; }
+</style>
+</head>
+<body>
+<div class="wrap">
+
+<header>
+  <div class="logo">AM·01<small>акустический модем</small></div>
+  <div class="led on-idle" id="led"><i></i><span id="ledText">ГОТОВ</span></div>
+</header>
+
+<div class="tabs">
+  <button id="tabTx" class="active">ПЕРЕДАЧА</button>
+  <button id="tabRx">ПРИЁМ</button>
+</div>
+
+<section class="panel active" id="tx">
+  <label class="fld" for="txText">СООБЩЕНИЕ</label>
+  <textarea id="txText" spellcheck="false" placeholder="текст для передачи..."></textarea>
+
+  <label class="fld">ИЛИ ФАЙЛ</label>
+  <label class="filebtn" id="fileBtn">
+    <span class="fname" id="fileName">выбрать файл…</span>
+    <span class="x" id="fileClear" title="убрать файл">×</span>
+    <input type="file" id="txFile">
+  </label>
+
+  <label class="fld">ГРОМКОСТЬ</label>
+  <div class="row">
+    <input type="range" id="txVol" min="0.1" max="1" step="0.05" value="0.6">
+    <span class="val" id="volVal">0.60</span>
+  </div>
+
+  <label class="fld">РЕЖИМ</label>
+  <div class="row">
+    <select id="selMode">
+      <option value="2">2-FSK · медленно, максимально надёжно</option>
+      <option value="4" selected>4-FSK · проверен в воздухе</option>
+      <option value="8">8-FSK · быстро, требует тишины</option>
+    </select>
+  </div>
+  <label class="fld">МС / СИМВОЛ</label>
+  <div class="row">
+    <input type="range" id="symMs" min="40" max="300" step="10" value="100">
+    <span class="val" id="symMsVal">100</span>
+  </div>
+  <label class="fld">ЧАСТОТЫ</label>
+  <div class="row">
+    <select id="selPreset">
+      <option value="standard" selected>standard · 1500+400·k / маркер 3500</option>
+      <option value="wide">wide · 1200+380·k / маркер 4300 (для 8-FSK)</option>
+      <option value="high">high · 2000+400·k / маркер 5300</option>
+    </select>
+  </div>
+  <details class="adv">
+    <summary>ЧАСТОТЫ ВРУЧНУЮ</summary>
+    <div class="row3">
+      <label>базовая, Гц <input type="number" id="fBase" min="500" max="8000"></label>
+      <label>шаг, Гц <input type="number" id="fStep" min="100" max="2000"></label>
+      <label>маркер, Гц <input type="number" id="fMarker" min="500" max="8000"></label>
+    </div>
+  </details>
+
+  <div class="meta" id="txMeta">—</div>
+  <div class="bar" id="txBar"><i id="txBarFill"></i></div>
+
+  <button class="go" id="btnSend">▸ ПЕРЕДАТЬ</button>
+  <div class="term" id="txLog"></div>
+</section>
+
+<section class="panel" id="rx">
+  <div class="meta" style="margin: 0 0 12px">режим настраивать не нужно — приёмник узнаёт его из служебной посылки передатчика</div>
+  <button class="go" id="btnRec">● ЗАПИСЬ</button>
+  <canvas class="viz" id="viz" width="600" height="90"></canvas>
+  <div class="term" id="rxLog"></div>
+  <a class="dl" id="dlLink">⤓ СОХРАНИТЬ ФАЙЛ</a>
+</section>
+
+<footer>
+  2/4/8-FSK · мс/символ и частоты настраиваются · авто-согласование режима служебной посылкой<br>
+  кадр <b>AM01</b>: имя + размер + SHA-256, блоки 64 Б с CRC32 · совместим с python-версией<br>
+  работает полностью офлайн · никаких внешних запросов
+</footer>
+
+</div>
+<script>
+"use strict";
+// ─── Параметры протокола (совпадают с phy.py!) ───
+const MARKER_DURATION = 0.5;
+const CFG_LEN = 15;
+const PRESETS = {
+  standard: { base: 1500, step: 400, marker: 3500 }, // проверен в воздухе (2/4-FSK)
+  wide:     { base: 1200, step: 380, marker: 4300 }, // широкая сетка под 8-FSK
+  high:     { base: 2000, step: 400, marker: 5300 }, // верхний диапазон
+};
+function makeParams(tones, symbolMs, base, step, marker) {
+  const freqs = [];
+  for (let i = 0; i < tones; i++) freqs.push(base + i * step);
+  return { tones, symbolMs, base, step, marker, freqs, bps: { 2: 1, 4: 2, 8: 3 }[tones], symDur: symbolMs / 1000 };
+}
+const CANON = makeParams(4, 100, 1500, 400, 3500); // базовый режим для служебной посылки — НЕ МЕНЯТЬ
+const SYMBOL_DURATION = CANON.symDur;
+const SYMBOL_FREQS = CANON.freqs;
+const FREQ_MARKER = CANON.marker;
+const MAGIC = [0x41, 0x4D, 0x30, 0x31]; // "AM01"
+const BLOCK_SIZE = 64;
+const FLAG_TEXT = 0x01;
+
+// ─── CRC32 ───
+const CRC_TABLE = (() => {
+  const t = new Uint32Array(256);
+  for (let n = 0; n < 256; n++) {
+    let c = n;
+    for (let k = 0; k < 8; k++) c = (c & 1) ? (0xEDB88320 ^ (c >>> 1)) : (c >>> 1);
+    t[n] = c >>> 0;
+  }
+  return t;
+})();
+function crc32(bytes) {
+  let c = 0xFFFFFFFF;
+  for (let i = 0; i < bytes.length; i++) c = CRC_TABLE[(c ^ bytes[i]) & 0xFF] ^ (c >>> 8);
+  return (c ^ 0xFFFFFFFF) >>> 0;
+}
+
+// ─── SHA-256 (чистый JS — не требует crypto.subtle, работает и на file://) ───
+function sha256(bytes) {
+  const K = [0x428a2f98,0x71374491,0xb5c0fbcf,0xe9b5dba5,0x3956c25b,0x59f111f1,0x923f82a4,0xab1c5ed5,
+    0xd807aa98,0x12835b01,0x243185be,0x550c7dc3,0x72be5d74,0x80deb1fe,0x9bdc06a7,0xc19bf174,
+    0xe49b69c1,0xefbe4786,0x0fc19dc6,0x240ca1cc,0x2de92c6f,0x4a7484aa,0x5cb0a9dc,0x76f988da,
+    0x983e5152,0xa831c66d,0xb00327c8,0xbf597fc7,0xc6e00bf3,0xd5a79147,0x06ca6351,0x14292967,
+    0x27b70a85,0x2e1b2138,0x4d2c6dfc,0x53380d13,0x650a7354,0x766a0abb,0x81c2c92e,0x92722c85,
+    0xa2bfe8a1,0xa81a664b,0xc24b8b70,0xc76c51a3,0xd192e819,0xd6990624,0xf40e3585,0x106aa070,
+    0x19a4c116,0x1e376c08,0x2748774c,0x34b0bcb5,0x391c0cb3,0x4ed8aa4a,0x5b9cca4f,0x682e6ff3,
+    0x748f82ee,0x78a5636f,0x84c87814,0x8cc70208,0x90befffa,0xa4506ceb,0xbef9a3f7,0xc67178f2];
+  let h0=0x6a09e667,h1=0xbb67ae85,h2=0x3c6ef372,h3=0xa54ff53a,h4=0x510e527f,h5=0x9b05688c,h6=0x1f83d9ab,h7=0x5be0cd19;
+  const len = bytes.length;
+  const withPad = new Uint8Array(((len + 9 + 63) >> 6) << 6);
+  withPad.set(bytes);
+  withPad[len] = 0x80;
+  const bitLen = len * 8;
+  new DataView(withPad.buffer).setUint32(withPad.length - 4, bitLen >>> 0);
+  new DataView(withPad.buffer).setUint32(withPad.length - 8, Math.floor(bitLen / 4294967296));
+  const w = new Uint32Array(64);
+  const rr = (x, n) => (x >>> n) | (x << (32 - n));
+  for (let off = 0; off < withPad.length; off += 64) {
+    const dv = new DataView(withPad.buffer, off, 64);
+    for (let i = 0; i < 16; i++) w[i] = dv.getUint32(i * 4);
+    for (let i = 16; i < 64; i++) {
+      const s0 = rr(w[i-15],7) ^ rr(w[i-15],18) ^ (w[i-15]>>>3);
+      const s1 = rr(w[i-2],17) ^ rr(w[i-2],19) ^ (w[i-2]>>>10);
+      w[i] = (w[i-16] + s0 + w[i-7] + s1) >>> 0;
+    }
+    let a=h0,b=h1,c=h2,d=h3,e=h4,f=h5,g=h6,h=h7;
+    for (let i = 0; i < 64; i++) {
+      const S1 = rr(e,6) ^ rr(e,11) ^ rr(e,25);
+      const ch = (e & f) ^ (~e & g);
+      const t1 = (h + S1 + ch + K[i] + w[i]) >>> 0;
+      const S0 = rr(a,2) ^ rr(a,13) ^ rr(a,22);
+      const mj = (a & b) ^ (a & c) ^ (b & c);
+      const t2 = (S0 + mj) >>> 0;
+      h=g; g=f; f=e; e=(d+t1)>>>0; d=c; c=b; b=a; a=(t1+t2)>>>0;
+    }
+    h0=(h0+a)>>>0; h1=(h1+b)>>>0; h2=(h2+c)>>>0; h3=(h3+d)>>>0;
+    h4=(h4+e)>>>0; h5=(h5+f)>>>0; h6=(h6+g)>>>0; h7=(h7+h)>>>0;
+  }
+  const out = new Uint8Array(32);
+  const dv = new DataView(out.buffer);
+  [h0,h1,h2,h3,h4,h5,h6,h7].forEach((v, i) => dv.setUint32(i * 4, v));
+  return out;
+}
+
+// ─── Биты/байты ───
+function bytesToBits(bytes) {
+  const bits = [];
+  for (const b of bytes) for (let p = 7; p >= 0; p--) bits.push((b >> p) & 1);
+  return bits;
+}
+function bitsToBytes(bits) {
+  const usable = bits.length - (bits.length % 8);
+  const out = new Uint8Array(usable / 8);
+  for (let i = 0; i < usable; i += 8) {
+    let byte = 0;
+    for (let j = 0; j < 8; j++) byte = (byte << 1) | bits[i + j];
+    out[i / 8] = byte;
+  }
+  return out;
+}
+
+// ─── Кадр AM01 (зеркало protocol.py) ───
+function buildFrame(filename, payload, isText) {
+  const nameBytes = new TextEncoder().encode(filename);
+  const header = new Uint8Array(4 + 1 + 1 + 4 + 32 + nameBytes.length);
+  header.set(MAGIC, 0);
+  header[4] = isText ? FLAG_TEXT : 0;
+  header[5] = nameBytes.length;
+  new DataView(header.buffer).setUint32(6, payload.length);
+  header.set(sha256(payload), 10);
+  header.set(nameBytes, 42);
+  const hcrc = new Uint8Array(4);
+  new DataView(hcrc.buffer).setUint32(0, crc32(header));
+  const parts = [header, hcrc];
+  for (let i = 0; i < payload.length; i += BLOCK_SIZE) {
+    const block = payload.slice(i, i + BLOCK_SIZE);
+    const bcrc = new Uint8Array(4);
+    new DataView(bcrc.buffer).setUint32(0, crc32(block));
+    parts.push(block, bcrc);
+  }
+  const total = parts.reduce((s, p) => s + p.length, 0);
+  const frame = new Uint8Array(total);
+  let off = 0;
+  for (const p of parts) { frame.set(p, off); off += p.length; }
+  return frame;
+}
+
+function parseFrame(data) {
+  let magicAt = -1;
+  for (let i = 0; i + 4 <= data.length; i++) {
+    if (data[i]===MAGIC[0] && data[i+1]===MAGIC[1] && data[i+2]===MAGIC[2] && data[i+3]===MAGIC[3]) { magicAt = i; break; }
+  }
+  if (magicAt < 0) throw new Error("кадр AM01 не найден");
+  data = data.slice(magicAt);
+  const fixed = 42;
+  if (data.length < fixed + 4) throw new Error("кадр оборван в заголовке");
+  const flags = data[4], nameLen = data[5];
+  const dv = new DataView(data.buffer, data.byteOffset);
+  const payloadLen = dv.getUint32(6);
+  const shaExpected = data.slice(10, 42);
+  const headerEnd = fixed + nameLen;
+  if (data.length < headerEnd + 4) throw new Error("кадр оборван в имени файла");
+  const filename = new TextDecoder().decode(data.slice(fixed, headerEnd));
+  const headerCrc = new DataView(data.buffer, data.byteOffset + headerEnd, 4).getUint32(0);
+  if (crc32(data.slice(0, headerEnd)) !== headerCrc) throw new Error("CRC32 заголовка не сошёлся");
+
+  const totalBlocks = Math.ceil(payloadLen / BLOCK_SIZE);
+  const payload = new Uint8Array(payloadLen);
+  const badBlocks = [];
+  let truncated = false;
+  let offset = headerEnd + 4, written = 0;
+  for (let bi = 0; bi < totalBlocks; bi++) {
+    const blockLen = Math.min(BLOCK_SIZE, payloadLen - bi * BLOCK_SIZE);
+    const end = offset + blockLen + 4;
+    if (data.length < end) {
+      truncated = true;
+      for (let k = bi; k < totalBlocks; k++) badBlocks.push(k);
+      break;
+    }
+    const block = data.slice(offset, offset + blockLen);
+    const crcExpected = new DataView(data.buffer, data.byteOffset + offset + blockLen, 4).getUint32(0);
+    if (crc32(block) !== crcExpected) badBlocks.push(bi);
+    payload.set(block, written);
+    written += blockLen;
+    offset = end;
+  }
+  const shaActual = sha256(payload);
+  const shaOk = !truncated && written === payloadLen && shaActual.every((v, i) => v === shaExpected[i]);
+  return { filename, isText: !!(flags & FLAG_TEXT), payload, totalBlocks, badBlocks, truncated, shaOk };
+}
+
+// ─── Служебная посылка CFG: объявление параметров (зеркало phy.py) ───
+function packConfig(p) {
+  const b = new Uint8Array(CFG_LEN);
+  b[0] = 0x41; b[1] = 0x43; // "AC"
+  b[2] = p.tones;
+  const dv = new DataView(b.buffer);
+  dv.setUint16(3, p.symbolMs);
+  dv.setUint16(5, p.base);
+  dv.setUint16(7, p.step);
+  dv.setUint16(9, p.marker);
+  dv.setUint32(11, crc32(b.slice(0, 11)));
+  return b;
+}
+
+function unpackConfig(data) {
+  if (data.length < CFG_LEN || data[0] !== 0x41 || data[1] !== 0x43) return null;
+  const dv = new DataView(data.buffer, data.byteOffset);
+  if (crc32(data.slice(0, 11)) !== dv.getUint32(11)) return null;
+  const tones = data[2];
+  if (tones !== 2 && tones !== 4 && tones !== 8) return null;
+  return makeParams(tones, dv.getUint16(3), dv.getUint16(5), dv.getUint16(7), dv.getUint16(9));
+}
+
+// ─── Модулятор (зеркало phy.py) ───
+function createTone(samples, freq, sampleRate, volume, out, offset) {
+  const fade = Math.min(Math.round(0.005 * sampleRate), samples >> 2);
+  for (let i = 0; i < samples; i++) {
+    let v = volume * Math.sin(2 * Math.PI * freq * i / sampleRate);
+    if (i < fade) v *= i / fade;
+    if (i >= samples - fade) v *= (samples - 1 - i) / fade;
+    out[offset + i] = v;
+  }
+  return offset + samples;
+}
+
+function symbolsOf(bytes, p) {
+  const bits = bytesToBits(bytes);
+  while (bits.length % p.bps) bits.push(0);
+  const symbols = [];
+  for (let i = 0; i < bits.length; i += p.bps) {
+    let v = 0;
+    for (let j = 0; j < p.bps; j++) v = (v << 1) | bits[i + j];
+    symbols.push(v);
+  }
+  return symbols;
+}
+
+function synth(parts, sampleRate, volume) {
+  const total = parts.reduce((s, q) => s + Math.round(q.d * sampleRate), 0);
+  const out = new Float32Array(total);
+  let off = 0;
+  for (const q of parts) {
+    const n = Math.round(q.d * sampleRate);
+    if (q.f) createTone(n, q.f, sampleRate, volume, out, off);
+    off += n;
+  }
+  return out;
+}
+
+// Старый формат без служебной посылки (для тестов и совместимост��)
+function buildSignal(frame, sampleRate, volume, p = CANON) {
+  const parts = [{ f: 0, d: 0.5 }, { f: p.marker, d: MARKER_DURATION }];
+  for (const s of symbolsOf(frame, p)) parts.push({ f: p.freqs[s], d: p.symDur });
+  parts.push({ f: p.marker, d: MARKER_DURATION }, { f: 0, d: 0.3 });
+  return synth(parts, sampleRate, volume);
+}
+
+// Полный эфир: служебная посылка (CFG) в базовом режиме + данные в режиме p
+function buildNegoSignal(frame, sampleRate, volume, p) {
+  const parts = [{ f: 0, d: 0.5 }, { f: CANON.marker, d: MARKER_DURATION }];
+  for (const s of symbolsOf(packConfig(p), CANON)) parts.push({ f: CANON.freqs[s], d: CANON.symDur });
+  parts.push({ f: CANON.marker, d: MARKER_DURATION }, { f: p.marker, d: MARKER_DURATION });
+  for (const s of symbolsOf(frame, p)) parts.push({ f: p.freqs[s], d: p.symDur });
+  parts.push({ f: p.marker, d: MARKER_DURATION }, { f: 0, d: 0.3 });
+  return synth(parts, sampleRate, volume);
+}
+
+// ─── Демодулятор (зеркало receiver.py) ───
+function toneEnergy(signal, start, len, freq, sampleRate) {
+  let re = 0, im = 0;
+  const w = 2 * Math.PI * freq / sampleRate;
+  for (let i = 0; i < len; i++) {
+    const v = signal[start + i];
+    re += v * Math.cos(w * i);
+    im += v * Math.sin(w * i);
+  }
+  return Math.sqrt(re * re + im * im) / len;
+}
+
+function classify(signal, start, len, sampleRate, p = CANON) {
+  const energies = p.freqs.map(f => toneEnergy(signal, start, len, f, sampleRate));
+  const markerE = toneEnergy(signal, start, len, p.marker, sampleRate);
+  let best = 0;
+  for (let i = 1; i < energies.length; i++) if (energies[i] > energies[best]) best = i;
+  return { result: markerE > energies[best] ? "marker" : best, energies, markerE };
+}
+
+function rms(signal, start, len) {
+  let s = 0;
+  for (let i = 0; i < len; i++) s += signal[start + i] * signal[start + i];
+  return Math.sqrt(s / len);
+}
+
+function findDataStart(signal, sampleRate, p = CANON, from = 0) {
+  const hop = Math.round(0.01 * sampleRate), win = Math.round(0.05 * sampleRate);
+  const requiredRun = 25;
+  let run = 0;
+  const count = Math.floor((signal.length - from - win) / hop);
+  for (let index = 0; index < count; index++) {
+    const start = from + index * hop;
+    let isMarker = false;
+    if (rms(signal, start, win) > 1e-4) {
+      const c = classify(signal, start, win, sampleRate, p);
+      isMarker = c.markerE > 2 * Math.max(...c.energies);
+    }
+    if (isMarker) run++;
+    else {
+      if (run >= requiredRun) return from + index * hop + (win >> 1) - (hop >> 1);
+      run = 0;
+    }
+  }
+  return null;
+}
+
+function refineDataStart(signal, coarseStart, sampleRate, p = CANON) {
+  const symSamples = Math.round(p.symDur * sampleRate);
+  const guard = symSamples >> 2;
+  const maxShift = Math.round(0.6 * symSamples);
+  const step = Math.max(1, Math.round(symSamples / 20));
+  const edge = Math.round(0.005 * sampleRate);
+  const edgeWin = guard;
+  let bestOffset = 0, bestScore = -1;
+  for (let offset = -maxShift; offset <= maxShift; offset += step) {
+    const start = coarseStart + offset;
+    if (start < 0) continue;
+    let score = 0, count = 0, position = start;
+    if (start >= edge + edgeWin && start + edge + edgeWin <= signal.length) {
+      const pre = classify(signal, start - edge - edgeWin, edgeWin, sampleRate, p);
+      const post = classify(signal, start + edge, edgeWin, sampleRate, p);
+      if (pre.result === "marker" && post.result !== "marker") score += 10.0;
+    }
+    while (position + symSamples <= signal.length && count < 16) {
+      const c = classify(signal, position + guard, symSamples - 2 * guard, sampleRate, p);
+      if (c.result === "marker") break;
+      const ordered = [...c.energies].sort((a, b) => b - a);
+      score += (ordered[0] - ordered[1]) / (ordered[0] + ordered[1] + 1e-12);
+      count++;
+      position += symSamples;
+    }
+    if (count > 0) score /= count;
+    if (count > 0 && (score > bestScore + 1e-9 ||
+        (Math.abs(score - bestScore) <= 1e-9 && Math.abs(offset) < Math.abs(bestOffset)))) {
+      bestScore = score;
+      bestOffset = offset;
+    }
+  }
+  return coarseStart + bestOffset;
+}
+
+function decodeSymbols(signal, start, sampleRate, p) {
+  const symSamples = Math.round(p.symDur * sampleRate);
+  const guard = symSamples >> 2;
+  const bits = [];
+  let position = start;
+  while (position + symSamples <= signal.length) {
+    const segLen = symSamples - 2 * guard;
+    if (rms(signal, position + guard, segLen) < 2e-4) break;
+    const c = classify(signal, position + guard, segLen, sampleRate, p);
+    if (c.result === "marker") break;
+    for (let shift = p.bps - 1; shift >= 0; shift--) bits.push((c.result >> shift) & 1);
+    position += symSamples;
+  }
+  return { bits, end: position };
+}
+
+function decodeSignal(signal, sampleRate) {
+  let dataStart = findDataStart(signal, sampleRate);
+  if (dataStart === null) return null;
+  dataStart = refineDataStart(signal, dataStart, sampleRate);
+  return decodeSymbols(signal, dataStart, sampleRate, CANON).bits;
+}
+
+// Авто-приём: читаем CFG в базовом режиме и переключаемся на объявленный
+function decodeAuto(signal, sampleRate) {
+  const coarse = findDataStart(signal, sampleRate, CANON, 0);
+  if (coarse === null) return { error: "стартовый маркер " + CANON.marker + " Гц не найден" };
+  const start = refineDataStart(signal, coarse, sampleRate, CANON);
+  const first = decodeSymbols(signal, start, sampleRate, CANON);
+  const p = unpackConfig(bitsToBytes(first.bits));
+  if (!p) return { params: CANON, bits: first.bits, legacy: true };
+  const coarse2 = findDataStart(signal, sampleRate, p, first.end);
+  if (coarse2 === null) return { error: "маркер данных " + p.marker + " Гц не найден после служебной посылки", params: p };
+  const start2 = refineDataStart(signal, coarse2, sampleRate, p);
+  return { params: p, bits: decodeSymbols(signal, start2, sampleRate, p).bits, legacy: false };
+}
+
+function validateParams(p) {
+  const errors = [], warnings = [];
+  if (p.symbolMs < 20 || p.symbolMs > 500) errors.push("длительность символа: 20–500 мс");
+  if (p.base < 500) errors.push("нижний тон ниже 500 Гц — встроенные динамики его почти не играют");
+  if (Math.max(...p.freqs, p.marker) > 8000) errors.push("частоты выше 8 кГц ненадёжны для встроенного аудио");
+  for (const f of p.freqs) if (Math.abs(f - p.marker) < 300) errors.push(`тон ${f} Гц слишком близко к маркеру ${p.marker} Гц (нужно ≥300 Гц)`);
+  if (errors.length) return { errors, warnings };
+  const minStep = Math.round(2000 / p.symbolMs) + 100;
+  if (p.step < minStep) warnings.push(`шаг ${p.step} Гц мал для ${p.symbolMs} мс/символ (лучше ≥${minStep} Гц)`);
+  if (p.symbolMs < 50) warnings.push("меньше 50 мс/символ на встроенных динамиках часто сбоит");
+  for (const f of p.freqs) for (const k of [2, 3, 4])
+    if (Math.abs(k * f - p.marker) < 100) warnings.push(`маркер ${p.marker} Гц ≈ ${k}-я гармоника тона ${f} Гц — возможны ложные маркеры`);
+  return { errors, warnings };
+}
+
+function describeParams(p) {
+  return `${p.tones}-FSK · ${p.symbolMs} мс/символ · тона ${p.base}+${p.step}·k Гц (${p.freqs[0]}–${p.freqs[p.freqs.length - 1]}) · маркер ${p.marker} Гц · ${Math.round(p.bps * 1000 / p.symbolMs)} бит/с`;
+}
+
+// ────────────── UI ──────────────
+const $ = id => document.getElementById(id);
+const isNode = typeof document === "undefined";
+
+if (!isNode) {
+
+  const led = $("led"), ledText = $("ledText");
+  function setLed(mode, text) {
+    led.className = "led on-" + mode;
+    ledText.textContent = text;
+  }
+
+  function log(el, msg, cls) {
+    const t = new Date().toTimeString().slice(0, 8);
+    const line = document.createElement("div");
+    line.innerHTML = `<span class="t">${t}</span> ` + (cls ? `<span class="${cls}">${msg}</span>` : msg);
+    el.appendChild(line);
+    el.scrollTop = el.scrollHeight;
+  }
+
+  // вкладки
+  function showTab(name) {
+    $("tx").classList.toggle("active", name === "tx");
+    $("rx").classList.toggle("active", name === "rx");
+    $("tabTx").classList.toggle("active", name === "tx");
+    $("tabRx").classList.toggle("active", name === "rx");
+  }
+  $("tabTx").onclick = () => showTab("tx");
+  $("tabRx").onclick = () => showTab("rx");
+
+  // громкость
+  $("txVol").oninput = () => { $("volVal").textContent = parseFloat($("txVol").value).toFixed(2); };
+
+  // режим передачи
+  $("symMs").oninput = () => { $("symMsVal").textContent = $("symMs").value; updateMeta(); };
+  $("selMode").onchange = () => {
+    if ($("selMode").value === "8" && $("selPreset").value === "standard") {
+      $("selPreset").value = "wide"; // в standard тон №5 попадает в маркер 3500
+      syncPlaceholders();
+    }
+    updateMeta();
+  };
+  $("selPreset").onchange = () => { syncPlaceholders(); updateMeta(); };
+  for (const id of ["fBase", "fStep", "fMarker"]) $(id).oninput = updateMeta;
+
+  function syncPlaceholders() {
+    const pr = PRESETS[$("selPreset").value];
+    $("fBase").placeholder = pr.base;
+    $("fStep").placeholder = pr.step;
+    $("fMarker").placeholder = pr.marker;
+  }
+  syncPlaceholders();
+
+  function currentParams() {
+    const pr = PRESETS[$("selPreset").value];
+    return makeParams(
+      parseInt($("selMode").value, 10),
+      parseInt($("symMs").value, 10),
+      parseInt($("fBase").value, 10) || pr.base,
+      parseInt($("fStep").value, 10) || pr.step,
+      parseInt($("fMarker").value, 10) || pr.marker,
+    );
+  }
+
+  // выбор файла
+  $("txFile").onchange = () => {
+    const f = $("txFile").files[0];
+    $("fileName").textContent = f ? `${f.name} (${f.size} Б)` : "выбрать файл…";
+    $("fileBtn").classList.toggle("has", !!f);
+    updateMeta();
+  };
+  $("fileClear").onclick = (e) => {
+    e.preventDefault();
+    $("txFile").value = "";
+    $("txFile").onchange();
+  };
+  $("txText").oninput = updateMeta;
+
+  function estimate(payloadLen, nameLen, p) {
+    const frameBytes = 46 + nameLen + payloadLen + 4 * Math.ceil(payloadLen / BLOCK_SIZE);
+    const cfgSymbols = Math.ceil(CFG_LEN * 8 / CANON.bps);
+    const dataSymbols = Math.ceil(frameBytes * 8 / p.bps);
+    const seconds = 0.8 + MARKER_DURATION * 3 + cfgSymbols * CANON.symDur + dataSymbols * p.symDur;
+    return { frameBytes, seconds };
+  }
+
+  function updateMeta() {
+    const f = $("txFile").files[0];
+    const text = $("txText").value;
+    let payloadLen, nameLen, what;
+    const p = currentParams();
+    const check = validateParams(p);
+    const alert = check.errors.length
+      ? ` · <span style="color:var(--red)">⚠ ${check.errors[0]}</span>`
+      : check.warnings.length ? ` · <span style="color:var(--amber)">⚠ ${check.warnings[0]}</span>` : "";
+    if (f) { payloadLen = f.size; nameLen = new TextEncoder().encode(f.name).length; what = f.name; }
+    else if (text) { payloadLen = new TextEncoder().encode(text).length; nameLen = 11; what = "текст"; }
+    else { $("txMeta").innerHTML = describeParams(p) + alert; return; }
+    const { frameBytes, seconds } = estimate(payloadLen, nameLen, p);
+    const m = Math.floor(seconds / 60), s = Math.round(seconds % 60);
+    $("txMeta").innerHTML =
+      `<b>${what}</b> · кадр ${frameBytes} Б · ${describeParams(p)} · эфир ~${m ? m + " мин " : ""}${s} с`
+      + ` · приёмнику --duration ${Math.ceil(seconds + 10)}` + alert;
+  }
+  updateMeta();
+
+  // ─── Передача ───
+  $("btnSend").onclick = async () => {
+    const txLog = $("txLog");
+    const volume = parseFloat($("txVol").value);
+    const f = $("txFile").files[0];
+    let payload, filename, isText;
+    try {
+      if (f) {
+        payload = new Uint8Array(await f.arrayBuffer());
+        filename = f.name; isText = false;
+      } else {
+        const text = $("txText").value;
+        if (!text) { log(txLog, "введите текст или выберите файл", "warn"); return; }
+        payload = new TextEncoder().encode(text);
+        filename = "message.txt"; isText = true;
+      }
+      const p = currentParams();
+      const check = validateParams(p);
+      if (check.errors.length) { check.errors.forEach(er => log(txLog, "параметры: " + er, "err")); return; }
+      check.warnings.forEach(w => log(txLog, "внимание: " + w, "warn"));
+      const frame = buildFrame(filename, payload, isText);
+      const ctx = new (window.AudioContext || window.webkitAudioContext)();
+      const signal = buildNegoSignal(frame, ctx.sampleRate, volume, p);
+      const durS = signal.length / ctx.sampleRate;
+      log(txLog, `${filename} · ${payload.length} Б → кадр ${frame.length} Б · sha256 ${hex(sha256(payload)).slice(0, 12)}…`);
+      log(txLog, `режим: ${describeParams(p)} — приёмник узнает его сам из служебной посылки`);
+      log(txLog, `эфир ${durS.toFixed(0)} с @ ${ctx.sampleRate} Гц — пошла передача…`);
+      const buf = ctx.createBuffer(1, signal.length, ctx.sampleRate);
+      buf.copyToChannel(signal, 0);
+      const src = ctx.createBufferSource();
+      src.buffer = buf;
+      src.connect(ctx.destination);
+      $("btnSend").disabled = true;
+      setLed("tx", "ЭФИР");
+      $("txBar").classList.add("show");
+      const t0 = performance.now();
+      const tick = setInterval(() => {
+        const p = Math.min(100, (performance.now() - t0) / 10 / durS);
+        $("txBarFill").style.width = p + "%";
+      }, 250);
+      src.onended = () => {
+        clearInterval(tick);
+        $("txBarFill").style.width = "100%";
+        log(txLog, "передача завершена", "ok");
+        $("btnSend").disabled = false;
+        setLed("idle", "ГОТОВ");
+        setTimeout(() => { $("txBar").classList.remove("show"); $("txBarFill").style.width = "0%"; }, 1200);
+        ctx.close();
+      };
+      src.start();
+    } catch (e) {
+      log(txLog, "ошибка: " + e.message, "err");
+      $("btnSend").disabled = false;
+      setLed("idle", "ГОТОВ");
+    }
+  };
+
+  function hex(bytes) {
+    return Array.from(bytes, b => b.toString(16).padStart(2, "0")).join("");
+  }
+
+  // ─── Приём + визуализатор ───
+  let recCtx = null, recStream = null, recNode = null, analyser = null;
+  let recChunks = [], recording = false, vizRaf = 0, recT0 = 0;
+
+  const viz = $("viz"), vctx = viz.getContext("2d");
+
+  function drawIdleViz() {
+    vctx.fillStyle = "#080c09";
+    vctx.fillRect(0, 0, viz.width, viz.height);
+    vctx.strokeStyle = "#17231b";
+    vctx.beginPath();
+    vctx.moveTo(0, viz.height / 2);
+    vctx.lineTo(viz.width, viz.height / 2);
+    vctx.stroke();
+  }
+  drawIdleViz();
+
+  function drawViz() {
+    if (!analyser) return;
+    const n = analyser.frequencyBinCount;
+    const freqData = new Uint8Array(n);
+    analyser.getByteFrequencyData(freqData);
+    const sr = recCtx.sampleRate;
+    const fMin = 800, fMax = 4200;
+    const iMin = Math.floor(fMin / (sr / 2) * n), iMax = Math.ceil(fMax / (sr / 2) * n);
+    vctx.fillStyle = "#080c09";
+    vctx.fillRect(0, 0, viz.width, viz.height);
+    // метки рабочих частот
+    for (const f of [...SYMBOL_FREQS, FREQ_MARKER]) {
+      const x = (f - fMin) / (fMax - fMin) * viz.width;
+      vctx.strokeStyle = f === FREQ_MARKER ? "#5a4a26" : "#1d2b21";
+      vctx.beginPath(); vctx.moveTo(x, 0); vctx.lineTo(x, viz.height); vctx.stroke();
+    }
+    // спектр
+    vctx.fillStyle = "#43d97a";
+    const bins = iMax - iMin;
+    const bw = Math.max(1, viz.width / bins);
+    for (let i = iMin; i < iMax; i++) {
+      const x = (i - iMin) / bins * viz.width;
+      const h = freqData[i] / 255 * (viz.height - 6);
+      vctx.fillRect(x, viz.height - h, bw, h);
+    }
+    // таймер
+    vctx.fillStyle = "#5f7566";
+    vctx.font = "11px monospace";
+    vctx.fillText(((performance.now() - recT0) / 1000).toFixed(1) + " s", 6, 14);
+    vizRaf = requestAnimationFrame(drawViz);
+  }
+
+  $("btnRec").onclick = async () => {
+    const rxLog = $("rxLog");
+    if (!recording) {
+      try {
+        recStream = await navigator.mediaDevices.getUserMedia({
+          audio: { echoCancellation: false, noiseSuppression: false, autoGainControl: false },
+        });
+      } catch (e) {
+        log(rxLog, "нет доступа к микрофону: " + e.message, "err");
+        log(rxLog, "откройте страницу по https или с localhost — см. README", "warn");
+        return;
+      }
+      recCtx = new (window.AudioContext || window.webkitAudioContext)();
+      const source = recCtx.createMediaStreamSource(recStream);
+      analyser = recCtx.createAnalyser();
+      analyser.fftSize = 2048;
+      recNode = recCtx.createScriptProcessor(4096, 1, 1);
+      recChunks = [];
+      recNode.onaudioprocess = (e) => recChunks.push(new Float32Array(e.inputBuffer.getChannelData(0)));
+      source.connect(analyser);
+      analyser.connect(recNode);
+      recNode.connect(recCtx.destination);
+      recording = true;
+      recT0 = performance.now();
+      $("btnRec").textContent = "■ СТОП → ДЕКОДИРОВАТЬ";
+      $("btnRec").classList.add("rec");
+      $("dlLink").style.display = "none";
+      setLed("rec", "ЗАПИСЬ");
+      log(rxLog, `запись пошла @ ${recCtx.sampleRate} Гц — запускайте передатчик`);
+      drawViz();
+    } else {
+      recording = false;
+      cancelAnimationFrame(vizRaf);
+      const sampleRate = recCtx.sampleRate;
+      recNode.disconnect(); analyser.disconnect();
+      recStream.getTracks().forEach(t => t.stop());
+      await recCtx.close();
+      analyser = null;
+      $("btnRec").textContent = "● ЗАПИСЬ";
+      $("btnRec").classList.remove("rec");
+      setLed("idle", "ГОТОВ");
+      drawIdleViz();
+      const total = recChunks.reduce((s, c) => s + c.length, 0);
+      const signal = new Float32Array(total);
+      let off = 0;
+      for (const c of recChunks) { signal.set(c, off); off += c.length; }
+      recChunks = [];
+      log(rxLog, `записано ${(total / sampleRate).toFixed(1)} с — декодирую…`);
+      setTimeout(() => decodeAndShow(signal, sampleRate), 30);
+    }
+  };
+
+  function decodeAndShow(signal, sampleRate) {
+    const rxLog = $("rxLog");
+    const res = decodeAuto(signal, sampleRate);
+    if (res.error) {
+      log(rxLog, res.error, "err");
+      log(rxLog, "начинайте запись ДО передатчика и проверьте громкость", "warn");
+      return;
+    }
+    if (res.legacy) log(rxLog, "служебной посылки нет — принимаю в базовом режиме (старый передатчик)", "warn");
+    else log(rxLog, "передатчик объявил: " + describeParams(res.params), "ok");
+    const bits = res.bits;
+    if (!bits.length) {
+      log(rxLog, "режим согласован, но данные не приняты — повторите передачу", "err");
+      return;
+    }
+    const data = bitsToBytes(bits);
+    log(rxLog, `принято ${bits.length} бит (${data.length} Б)`);
+    try {
+      const r = parseFrame(data);
+      log(rxLog, `файл «${r.filename}» · ${r.payload.length} Б · блоки ${r.totalBlocks - r.badBlocks.length}/${r.totalBlocks}`);
+      if (r.badBlocks.length) log(rxLog, "повреждены блоки: " + r.badBlocks.join(", "), "warn");
+      if (r.truncated) log(rxLog, "передача оборвалась раньше конца", "warn");
+      if (r.shaOk) log(rxLog, "SHA-256 совпал — файл восстановлен байт-в-байт ✓", "ok");
+      else log(rxLog, "SHA-256 не совпал — повторите передачу", "err");
+      if (r.isText) log(rxLog, "текст: «" + new TextDecoder().decode(r.payload) + "»", "ok");
+      const link = $("dlLink");
+      link.href = URL.createObjectURL(new Blob([r.payload]));
+      link.download = r.filename;
+      link.style.display = "block";
+    } catch (e) {
+      log(rxLog, "кадр не распознан: " + e.message, "warn");
+      log(rxLog, "как текст UTF-8: «" + new TextDecoder().decode(data) + "»");
+    }
+  }
+
+} // !isNode
+</script>
+</body>
+</html>

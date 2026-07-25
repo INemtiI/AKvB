@@ -1,10 +1,10 @@
 """
-file_receiver.py — приём файла через звук с проверкой целостности.
+file_receiver.py — приём файла через звук с авто-согласованием параметров.
 
-Физический уровень тот же, что у receiver.py (4-FSK, 100 мс/символ) —
-переиспользуется импортом. После декодирования битов разбирается
-кадр (protocol.py): проверяются CRC32 блоков и SHA-256 всего файла,
-файл сохраняется под исходным именем в папку received/.
+НИЧЕГО НАСТРАИВАТЬ НЕ НУЖНО: передатчик в начале эфира объявляет режим
+(2/4/8-FSK, мс/символ, частоты) служебной посылкой в базовом режиме,
+приёмник читает её и переключается сам. Старые передатчики без служебной
+посылки тоже принимаются (базовый режим).
 
 Запуск (ЗАПУСКАТЬ ДО file_sender.py!):
     python file_receiver.py --duration 60
@@ -13,8 +13,9 @@ file_receiver.py — приём файла через звук с проверк
 import argparse
 from pathlib import Path
 
+import phy
 import protocol
-from receiver import decode_signal, record_audio, save_recording
+from receiver import record_audio, save_recording
 
 
 def report(result: dict, output_dir: Path) -> None:
@@ -46,7 +47,8 @@ def report(result: dict, output_dir: Path) -> None:
 
 
 def main() -> None:
-    parser = argparse.ArgumentParser(description="Приём файла через звук (4-FSK + кадр)")
+    parser = argparse.ArgumentParser(
+        description="Приём файла через звук (авто-согласование режима)")
     parser.add_argument("--duration", type=float, default=60.0,
                         help="Длительность записи в секундах (по умолчанию 60);"
                              " file_sender подскажет нужное значение")
@@ -62,23 +64,34 @@ def main() -> None:
     save_recording(signal, Path(args.wav))
 
     print("Декодирую...")
-    _, bits = decode_signal(signal)
+    result = phy.decode_auto(signal)
 
-    if not bits:
-        print("\nFAILED: стартовый маркер 3500 Гц не найден или данные не приняты.")
+    if result["error"]:
+        print(f"\nFAILED: {result['error']}.")
         print("Проверьте громкость, расстояние и запускайте file_receiver ДО file_sender.")
+        return
+
+    if result["legacy"]:
+        print("Служебная посылка не обнаружена — считаю, что передатчик старого формата"
+              f" ({phy.CANONICAL.describe()}).")
+    else:
+        print(f"Передатчик объявил режим: {result['params'].describe()}")
+
+    bits = result["bits"]
+    if not bits:
+        print("\nFAILED: данные не приняты.")
         return
 
     print(f"Принято битов: {len(bits)} ({len(bits) // 8} байт)")
 
     try:
-        result = protocol.parse_frame(protocol.bits_to_bytes(bits))
+        parsed = protocol.parse_frame(protocol.bits_to_bytes(bits))
     except protocol.FrameError as error:
         print(f"\nFAILED: {error}")
         print("Если передавался простой текст через sender.py — используйте receiver.py.")
         return
 
-    report(result, Path(args.outdir))
+    report(parsed, Path(args.outdir))
 
 
 if __name__ == "__main__":
