@@ -6,9 +6,6 @@ file_receiver.py — приём файла через звук с авто-со�
 приёмник читает её и переключается сам. Старые передатчики без служебной
 посылки тоже принимаются (базовый режим).
 
-Запись останавливается САМА, как только сообщение принято целиком
-(пришёл конечный маркер); --duration — лишь верхний предел ожидания.
-
 Запуск (ЗАПУСКАТЬ ДО file_sender.py!):
     python file_receiver.py --duration 60
 """
@@ -16,63 +13,9 @@ file_receiver.py — приём файла через звук с авто-со�
 import argparse
 from pathlib import Path
 
-import numpy as np
-
-try:
-    import sounddevice as sd
-except ImportError:
-    sd = None
-
 import phy
 import protocol
-from receiver import save_recording
-
-
-def frame_complete(signal: np.ndarray) -> bool:
-    """True, если в записи уже есть целый кадр (пришёл конечный маркер)."""
-    result = phy.decode_auto(signal)
-    if result["error"] or not result["bits"]:
-        return False
-    try:
-        parsed = protocol.parse_frame(protocol.bits_to_bytes(result["bits"]))
-    except protocol.FrameError:
-        return False  # заголовок ещё не дошёл — продолжаем запись
-    return not parsed["truncated"]
-
-
-def record_until_complete(max_duration: float, device) -> np.ndarray:
-    """Пишет микрофон и сама останавливается, как только кадр принят целиком.
-
-    Раз в секунду пробуем декодировать накопленную запись: если кадр
-    разобран и не оборван — конечный маркер пришёл, ждать больше нечего.
-    """
-    if sd is None:
-        raise SystemExit("Ошибка: библиотека sounddevice не установлена (pip install sounddevice)")
-
-    chunk = int(phy.SAMPLE_RATE * 0.25)
-    frames = []
-    recorded = 0.0
-    next_check = 3.0  # раньше 3 секунд кадр физически не успеет прийти
-
-    print(f"Запись пошла (максимум {max_duration:.0f} с) — запускайте file_sender.py!")
-    print("Остановлюсь сама, как только сообщение будет принято целиком.")
-
-    with sd.InputStream(samplerate=phy.SAMPLE_RATE, channels=1,
-                        dtype="float32", device=device, latency="high") as stream:
-        while recorded < max_duration:
-            data, _ = stream.read(chunk)
-            frames.append(data[:, 0].copy())
-            recorded += len(data) / phy.SAMPLE_RATE
-            if recorded >= next_check:
-                next_check = recorded + 1.0  # проверяем раз в секунду
-                signal = np.concatenate(frames)
-                if frame_complete(signal):
-                    print(f"Конечный маркер: сообщение принято целиком на {recorded:.1f} с"
-                          " — останавливаю запись.")
-                    return signal
-
-    print("Достигнут максимум длительности записи (конечный маркер не замечен).")
-    return np.concatenate(frames)
+from receiver import record_audio, save_recording
 
 
 def report(result: dict, output_dir: Path) -> None:
@@ -110,8 +53,8 @@ def main() -> None:
     parser = argparse.ArgumentParser(
         description="Приём файла через звук (авто-согласование режима)")
     parser.add_argument("--duration", type=float, default=60.0,
-                        help="Максимум записи в секундах (по умолчанию 60);"
-                             " запись остановится сама после конечного маркера")
+                        help="Длительность записи в секундах (по умолчанию 60);"
+                             " file_sender подскажет нужное значение")
     parser.add_argument("--device", type=int, default=None,
                         help="Номер микрофона из devices.py")
     parser.add_argument("--wav", default="recording.wav",
@@ -120,7 +63,7 @@ def main() -> None:
                         help="Папка для принятых файлов (по умолчанию received/)")
     args = parser.parse_args()
 
-    signal = record_until_complete(args.duration, args.device)
+    signal = record_audio(args.duration, args.device)
     save_recording(signal, Path(args.wav))
 
     print("Декодирую...")
