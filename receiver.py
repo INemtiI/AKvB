@@ -1,14 +1,14 @@
 """
-receiver.py — приёмник текстового сообщения через звук (BFSK).
+receiver.py — приёмник текстового сообщения через звук (4-FSK).
 
 Как работает:
   1. Записывает звук с микрофона (по умолчанию 20 секунд).
   2. Сохраняет запись в recording.wav (можно прослушать для отладки).
-  3. Находит стартовый маркер 3500 Гц.
-  4. Читает биты каждые 50 мс: 1000 Гц = 0, 2000 Гц = 1.
-     Анализируются только центральные 25 мс каждого бита —
-     края (по 12.5 мс) отбрасываются из-за реверберации и погрешности
-     синхронизации.
+  3. Находит стартовый маркер 3500 Гц и точно подстраивается.
+  4. Читает символы каждые 100 мс: 1500 Гц = 00, 1900 Гц = 01,
+     2300 Гц = 10, 2700 Гц = 11 (2 бита за символ).
+     Анализируются только центральные 50 мс каждого символа —
+     края (по 25 мс) отбрасываются из-за реверберации.
   5. Останавливается на конечном маркере 3500 Гц.
   6. Переводит биты в текст (UTF-8) и записывает в received_message.txt.
 
@@ -30,10 +30,9 @@ except ImportError:
 
 # ==== Параметры протокола (должны совпадать с sender.py!) ====
 SAMPLE_RATE = 48000
-BIT_DURATION = 0.05       # 50 мс на бит
-FREQ_ZERO = 1000          # бит 0
-FREQ_ONE = 2000           # бит 1
-FREQ_MARKER = 3500        # маркер (НЕ 3000: это гармоника 1000 Гц!)
+SYMBOL_DURATION = 0.1      # 100 мс на символ (2 бита)
+SYMBOL_FREQS = [1500, 1900, 2300, 2700]  # 00, 01, 10, 11
+FREQ_MARKER = 3500
 MARKER_DURATION = 0.5
 
 OUTPUT_FILE = "received_message.txt"
@@ -77,19 +76,20 @@ def tone_energy(segment: np.ndarray, frequency: float) -> float:
 
 
 def classify_segment(segment: np.ndarray):
-    """Возвращает (частота-победитель, энергии по всем трём частотам)."""
-    energies = {
-        FREQ_ZERO: tone_energy(segment, FREQ_ZERO),
-        FREQ_ONE: tone_energy(segment, FREQ_ONE),
-        FREQ_MARKER: tone_energy(segment, FREQ_MARKER),
-    }
-    winner = max(energies, key=energies.get)
-    return winner, energies
+    """Возвращает (номер символа 0..3 или 'marker', энергии символьных
+    тонов, энергия маркера)."""
+    energies = [tone_energy(segment, f) for f in SYMBOL_FREQS]
+    marker_energy = tone_energy(segment, FREQ_MARKER)
+
+    best_symbol = int(np.argmax(energies))
+    if marker_energy > energies[best_symbol]:
+        return "marker", energies, marker_energy
+    return best_symbol, energies, marker_energy
 
 
 def find_data_start(signal: np.ndarray):
-    """Ищет конец стартового маркера 3500 Гц. Возвращает номер сэмпла,
-    с которого начинаются биты данных, или None, если маркер не найден."""
+    """Ищет конец стартового маркера 3500 Гц (грубо). Возвращает номер
+    сэмпла, с которого начинаются символы, или None."""
     hop = int(0.01 * SAMPLE_RATE)   # шаг 10 мс
     win = int(0.05 * SAMPLE_RATE)   # окно 50 мс
 
@@ -104,12 +104,8 @@ def find_data_start(signal: np.ndarray):
 
         is_marker = False
         if rms > 1e-4:
-            winner, energies = classify_segment(segment)
-            others = max(energies[FREQ_ZERO], energies[FREQ_ONE])
-            is_marker = (
-                winner == FREQ_MARKER
-                and energies[FREQ_MARKER] > 2 * others
-            )
+            _, energies, marker_energy = classify_segment(segment)
+            is_marker = marker_energy > 2 * max(energies)
 
         if is_marker:
             run_length += 1
@@ -125,16 +121,20 @@ def find_data_start(signal: np.ndarray):
 
 def refine_data_start(signal: np.ndarray, coarse_start: int) -> int:
     """Точная синхронизация: перебирает сдвиги ±60 мс вокруг грубой
-    оценки и выбирает тот, при котором решения по битам максимально
-    уверенные (энергия одной частоты сильно преобладает над другой).
+    оценки и выбирает тот, при котором решения по символам максимально
+    уверенные.
 
-    Без этого шага ошибка грубой оценки (~50 мс) ставит окно чтения
-    на стык соседних битов — при 100 мс/бит это ломает всё сообщение
-    (симптом: принятый бит = AND двух соседних отправленных битов)."""
-    bit_samples = int(BIT_DURATION * SAMPLE_RATE)
-    guard = int(0.0125 * SAMPLE_RATE)
+    Защита от ложной привязки: граница маркер/данные должна проходить
+    ровно через точку старта: в узком окне СРАЗУ ДО старта обязан
+    звучать маркер, а в окне СРАЗУ ПОСЛЕ — уже нет. Это отсекает
+    и сдвиг на целый символ, и средние сдвиги вроде ±30 мс."""
+    symbol_samples = int(SYMBOL_DURATION * SAMPLE_RATE)
+    guard = int(0.025 * SAMPLE_RATE)
     max_shift = int(0.06 * SAMPLE_RATE)    # ±60 мс
-    step = int(0.0025 * SAMPLE_RATE)       # шаг 2.5 мс
+    step = int(0.005 * SAMPLE_RATE)        # шаг 5 мс
+
+    edge = int(0.005 * SAMPLE_RATE)      # отступ 5 мс от границы
+    edge_win = int(0.025 * SAMPLE_RATE)  # окно 25 мс
 
     best_offset = 0
     best_score = -1.0
@@ -148,29 +148,28 @@ def refine_data_start(signal: np.ndarray, coarse_start: int) -> int:
         count = 0
         position = start
 
-        # Сразу перед первым битом должен звучать маркер — это
-        # отсекает ложную синхронизацию со сдвигом на целый бит
-        # (она тоже даёт «уверенные», но неверные решения).
-        if start >= bit_samples:
-            pre_segment = signal[start - bit_samples + guard:start - guard]
-            pre_winner, _ = classify_segment(pre_segment)
-            if pre_winner == FREQ_MARKER:
+        # Проверка границы маркер/данные.
+        if start >= edge + edge_win and start + edge + edge_win <= len(signal):
+            pre_segment = signal[start - edge - edge_win:start - edge]
+            post_segment = signal[start + edge:start + edge + edge_win]
+            pre_result, _, _ = classify_segment(pre_segment)
+            post_result, _, _ = classify_segment(post_segment)
+            if pre_result == "marker" and post_result != "marker":
                 score += 10.0  # бонус сильнее любой суммы уверенностей
 
-        # Оцениваем уверенность на первых 16 битах.
-        while position + bit_samples <= len(signal) and count < 16:
-            segment = signal[position + guard:position + bit_samples - guard]
-            e0 = tone_energy(segment, FREQ_ZERO)
-            e1 = tone_energy(segment, FREQ_ONE)
-            em = tone_energy(segment, FREQ_MARKER)
+        # Оцениваем уверенность на первых 16 символах.
+        while position + symbol_samples <= len(signal) and count < 16:
+            segment = signal[position + guard:position + symbol_samples - guard]
+            result, energies, marker_energy = classify_segment(segment)
 
-            if em > max(e0, e1):
+            if result == "marker":
                 break  # дошли до конечного маркера
 
-            top, second = max(e0, e1), min(e0, e1)
+            ordered = sorted(energies, reverse=True)
+            top, second = ordered[0], ordered[1]
             score += (top - second) / (top + second + 1e-12)
             count += 1
-            position += bit_samples
+            position += symbol_samples
 
         if count > 0:
             score /= count
@@ -192,26 +191,27 @@ def decode_signal(signal: np.ndarray):
 
     data_start = refine_data_start(signal, data_start)
 
-    bit_samples = int(BIT_DURATION * SAMPLE_RATE)
-    guard = int(0.0125 * SAMPLE_RATE)  # отбрасываем по 12.5 мс с каждого края бита
+    symbol_samples = int(SYMBOL_DURATION * SAMPLE_RATE)
+    guard = int(0.025 * SAMPLE_RATE)  # отбрасываем по 25 мс с каждого края
 
     bits: list[int] = []
     position = data_start
 
-    while position + bit_samples <= len(signal):
-        segment = signal[position + guard:position + bit_samples - guard]
+    while position + symbol_samples <= len(signal):
+        segment = signal[position + guard:position + symbol_samples - guard]
         rms = float(np.sqrt(np.mean(segment ** 2)))
 
         if rms < 2e-4:
             break  # тишина — передача прервалась
 
-        winner, _ = classify_segment(segment)
+        result, _, _ = classify_segment(segment)
 
-        if winner == FREQ_MARKER:
+        if result == "marker":
             break  # конечный маркер — сообщение закончилось
 
-        bits.append(1 if winner == FREQ_ONE else 0)
-        position += bit_samples
+        bits.append(result // 2)  # старший бит символа
+        bits.append(result % 2)   # младший бит символа
+        position += symbol_samples
 
     return bits_to_text(bits), bits
 
@@ -231,7 +231,7 @@ def bits_to_text(bits: list[int]) -> str:
 
 
 def main() -> None:
-    parser = argparse.ArgumentParser(description="Приёмник текста через звук (BFSK)")
+    parser = argparse.ArgumentParser(description="Приёмник текста через звук (4-FSK)")
     parser.add_argument("--duration", type=float, default=20.0,
                         help="Длительность записи в секундах (по умолчанию 20)")
     parser.add_argument("--device", type=int, default=None,

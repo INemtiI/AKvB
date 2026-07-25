@@ -1,19 +1,23 @@
 """
-sender.py — передатчик текстового сообщения через звук (BFSK).
+sender.py — передатчик текстового сообщения через звук (4-FSK).
 
 Как работает:
   1. Читает текст из файла MESSAGE_FILE (по умолчанию message.txt).
   2. Переводит текст в биты (UTF-8, 8 бит на байт, старший бит первым).
-  3. Воспроизводит:
-       - стартовый маркер 3500 Гц (0.5 с) — по нему приёмник находит начало;
-       - биты: 0 = 1000 Гц, 1 = 2000 Гц, каждый длительностью 50 мс;
-       - конечный маркер 3500 Гц (0.5 с) — конец сообщения.
+  3. Группирует биты по 2 (дибиты): каждый символ несёт 2 бита.
+  4. Воспроизводит:
+       - стартовый маркер 3500 Гц (0.5 с);
+       - символы по 100 мс: 00 = 1500 Гц, 01 = 1900 Гц,
+         10 = 2300 Гц, 11 = 2700 Гц;
+       - конечный маркер 3500 Гц (0.5 с).
 
-ПОЧЕМУ МАРКЕР 3500 ГЦ, А НЕ 3000:
-  Динамики ноутбуков искажают сигнал и создают гармоники:
-  тон 1000 Гц порождает призвуки на 2000 и 3000 Гц. Из-за этого приёмник
-  принимал бит 0 за маркер конца и обрывал приём.
-  3500 Гц не является гармоникой ни 1000, ни 2000 Гц.
+  Скорость: 2 бита за 100 мс = 20 бит/с — как у BFSK на 50 мс,
+  но с запасом на эхо как у 100 мс.
+
+ПОЧЕМУ ТАКИЕ ЧАСТОТЫ:
+  Гармоники (удвоенные частоты) тонов 1500/1900/2300/2700 Гц —
+  это 3000/3800/4600/5400 Гц: ни одна не совпадает ни с другим тоном,
+  ни с маркером 3500 Гц. Искажения динамика не путают символы.
 
 Запуск:
     python sender.py
@@ -32,12 +36,11 @@ except ImportError:
     sd = None
 
 # ==== Параметры протокола (должны совпадать с receiver.py!) ====
-SAMPLE_RATE = 48000       # частота дискретизации
-BIT_DURATION = 0.05       # 50 мс на бит
-FREQ_ZERO = 1000          # бит 0
-FREQ_ONE = 2000           # бит 1
-FREQ_MARKER = 3500        # маркер (НЕ 3000: это гармоника 1000 Гц!)
-MARKER_DURATION = 0.5     # длительность маркера
+SAMPLE_RATE = 48000        # частота дискретизации
+SYMBOL_DURATION = 0.1      # 100 мс на символ (2 бита)
+SYMBOL_FREQS = [1500, 1900, 2300, 2700]  # 00, 01, 10, 11
+FREQ_MARKER = 3500         # стартовый/конечный маркер
+MARKER_DURATION = 0.5
 
 # Файл с сообщением по умолчанию.
 MESSAGE_FILE = "message.txt"
@@ -70,18 +73,23 @@ def text_to_bits(text: str) -> list[int]:
     return bits
 
 
+def bits_to_symbols(bits: list[int]) -> list[int]:
+    """Список битов -> список символов 0..3 (по 2 бита, старший первым).
+    Длина всегда чётная: байт = 8 бит = 4 символа."""
+    return [bits[i] * 2 + bits[i + 1] for i in range(0, len(bits), 2)]
+
+
 def create_transmission(text: str, volume: float) -> np.ndarray:
-    """Собирает полный аудиосигнал: маркер + биты + маркер."""
-    bits = text_to_bits(text)
+    """Собирает полный аудиосигнал: маркер + символы + маркер."""
+    symbols = bits_to_symbols(text_to_bits(text))
 
     parts = [
         create_silence(0.5),
         create_tone(FREQ_MARKER, MARKER_DURATION, volume),  # старт
     ]
 
-    for bit in bits:
-        frequency = FREQ_ONE if bit == 1 else FREQ_ZERO
-        parts.append(create_tone(frequency, BIT_DURATION, volume))
+    for symbol in symbols:
+        parts.append(create_tone(SYMBOL_FREQS[symbol], SYMBOL_DURATION, volume))
 
     parts.append(create_tone(FREQ_MARKER, MARKER_DURATION, volume))  # конец
     parts.append(create_silence(0.3))
@@ -90,7 +98,7 @@ def create_transmission(text: str, volume: float) -> np.ndarray:
 
 
 def main() -> None:
-    parser = argparse.ArgumentParser(description="Передатчик текста через звук (BFSK)")
+    parser = argparse.ArgumentParser(description="Передатчик текста через звук (4-FSK)")
     parser.add_argument("--file", default=MESSAGE_FILE,
                         help=f"Файл с сообщением (по умолчанию {MESSAGE_FILE})")
     parser.add_argument("--volume", type=float, default=0.6,
@@ -108,11 +116,12 @@ def main() -> None:
 
     text = message_path.read_text(encoding="utf-8")
     bits = text_to_bits(text)
+    symbols = bits_to_symbols(bits)
 
-    duration = len(bits) * BIT_DURATION + 2 * MARKER_DURATION + 0.8
+    duration = len(symbols) * SYMBOL_DURATION + 2 * MARKER_DURATION + 0.8
 
     print(f"Сообщение: {text!r}")
-    print(f"Битов: {len(bits)} | Длительность передачи: ~{duration:.1f} с")
+    print(f"Битов: {len(bits)} | Символов: {len(symbols)} | Длительность: ~{duration:.1f} с")
     print("Сначала запустите receiver.py на другом компьютере!")
     print("Передача начнётся через 3 секунды...")
 
